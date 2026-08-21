@@ -93,9 +93,10 @@ def check(xml: str) -> list[str]:
     problems: list[str] = []
     for entity, fields in EXPECTED.items():
         # Сущности и составные типы объявляются разными тегами, ищем оба.
+        name = re.escape(entity)
         pattern = (
-            r'<(?:EntityType|ComplexType) Name="%s"'
-            r".*?</(?:EntityType|ComplexType)>" % re.escape(entity)
+            rf'<(?:EntityType|ComplexType) Name="{name}"'
+            r".*?</(?:EntityType|ComplexType)>"
         )
         block = re.search(pattern, xml, re.S)
         if not block:
