@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -37,6 +38,8 @@ class ToolCallRecord:
     onec_method: str
     ok: bool
     arguments: dict[str, object]
+    duration_ms: int = 0
+    error_message: str | None = None
 
 
 @dataclass
@@ -146,6 +149,7 @@ class AgentLoop:
 
             results: list[ToolResultBlock] = []
             for use in tool_uses:
+                started = time.monotonic()
                 outcome = await self._executor.execute(
                     tenant_id=tenant_id,
                     tool_name=use.name,
@@ -159,6 +163,8 @@ class AgentLoop:
                         onec_method=spec.onec_method if spec else "",
                         ok=outcome.ok,
                         arguments=use.input,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        error_message=None if outcome.ok else outcome.payload,
                     )
                 )
                 results.append(

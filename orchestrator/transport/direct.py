@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -22,22 +23,27 @@ class TenantEndpoint:
         self.signing_key = signing_key
 
 
+EndpointResolver = Callable[[str], Awaitable["TenantEndpoint | None"]]
+
+
 class DirectTransport(OneCTransport):
     def __init__(
         self,
-        endpoints: dict[str, TenantEndpoint],
+        resolve_endpoint: EndpointResolver,
         *,
         timeout_seconds: int = 120,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._endpoints = endpoints
+        # Резолвер, а не готовый словарь: адрес и ключ подписи базы лежат в БД и
+        # могут поменяться, пока оркестратор работает.
+        self._resolve = resolve_endpoint
         self._timeout = timeout_seconds
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
 
     async def call(
         self, tenant_id: str, onec_method: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        endpoint = self._endpoints.get(tenant_id)
+        endpoint = await self._resolve(tenant_id)
         if endpoint is None:
             raise ToolCallError(f"База «{tenant_id}» не зарегистрирована в оркестраторе")
 
@@ -67,7 +73,8 @@ class DirectTransport(OneCTransport):
             # Текст ошибки 1С может содержать наименования — маскирование
             # применяется выше по стеку, вместе с результатом.
             raise ToolCallError(
-                f"1С вернула ошибку {response.status_code} на «{onec_method}»: {response.text[:500]}"
+                f"1С вернула ошибку {response.status_code} "
+                f"на «{onec_method}»: {response.text[:500]}"
             )
 
         payload = response.json()

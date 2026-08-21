@@ -1,39 +1,67 @@
 """Точка входа оркестратора.
 
 Запуск:  uvicorn orchestrator.main:app --reload
+
+Режим определяется переменной `TRANSPORT`:
+  mock    — разработка: без базы 1С и без Postgres, диалоги в памяти;
+  polling — очередь задач в Postgres, 1С забирает их фоновым заданием;
+  direct  — оркестратор сам вызывает HTTP-сервис расширения.
 """
 
 from __future__ import annotations
 
-import os
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import structlog
 from fastapi import FastAPI
 
 from orchestrator.agent.loop import AgentLoop
-from orchestrator.api import chat, polling
+from orchestrator.api import chat, errors, polling
 from orchestrator.config import get_settings
+from orchestrator.db.crypto import Cipher
+from orchestrator.db.migrate import migrate
+from orchestrator.db.pool import close_pool, init_pool
+from orchestrator.db.repo.tenants import get_by_token
+from orchestrator.errors import ErrorException
 from orchestrator.llm.anthropic_provider import AnthropicProvider
+from orchestrator.store import DialogStore, MemoryDialogStore, PgDialogStore
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.tools.registry import TOOLS
+from orchestrator.transport.base import OneCTransport
+from orchestrator.transport.direct import DirectTransport, TenantEndpoint
 from orchestrator.transport.mock import MockTransport
-from orchestrator.transport.polling import PollingTransport
+from orchestrator.transport.pg_polling import PgPollingTransport, requeue_stale_forever
+
+log = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    background: list[asyncio.Task[Any]] = []
 
-    # Пока расширения 1С нет, транспорт по умолчанию — мок. Переключается
-    # переменной окружения BOTA_TRANSPORT=polling|direct.
-    mode = os.getenv("BOTA_TRANSPORT", "mock")
-    if mode == "polling":
-        transport: Any = PollingTransport(timeout_seconds=settings.tool_timeout_seconds)
-        app.state.polling = transport
+    if settings.storage == "postgres":
+        if not settings.encryption_key:
+            raise ErrorException(
+                RuntimeError(
+                    "Не задан ENCRYPTION_KEY — без него нельзя хранить словарь "
+                    "псевдонимов. Сгенерировать: openssl rand -base64 32"
+                )
+            )
+        app.state.cipher = Cipher.from_base64(settings.encryption_key)
+        await migrate(settings.database_url)
+        await init_pool(settings.database_url)
+        store: DialogStore = PgDialogStore(app.state.cipher)
     else:
-        transport = MockTransport()
+        app.state.cipher = None
+        store = MemoryDialogStore()
+
+    transport = _build_transport(settings.transport, settings.tool_timeout_seconds)
+    if settings.transport == "polling":
+        background.append(asyncio.create_task(requeue_stale_forever()))
 
     provider = AnthropicProvider(
         api_key=settings.anthropic_api_key,
@@ -46,8 +74,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_tool_calls=settings.max_tool_calls,
         effort=settings.llm_effort,
     )
-    app.state.transport_mode = mode
-    yield
+    app.state.store = store
+    app.state.transport_mode = settings.transport
+
+    log.info("orchestrator_started", transport=settings.transport, storage=settings.storage)
+    try:
+        yield
+    finally:
+        for task in background:
+            task.cancel()
+        if settings.storage == "postgres":
+            await close_pool()
+
+
+def _build_transport(mode: str, timeout_seconds: int) -> OneCTransport:
+    if mode == "polling":
+        return PgPollingTransport(timeout_seconds=timeout_seconds)
+    if mode == "direct":
+        return DirectTransport(_resolve_endpoint, timeout_seconds=timeout_seconds)
+    return MockTransport()
+
+
+async def _resolve_endpoint(tenant_id: str) -> TenantEndpoint | None:
+    """Адрес и ключ подписи базы берутся из БД на каждый вызов, а не при старте."""
+    settings = get_settings()
+    cipher = Cipher.from_base64(settings.encryption_key or "")
+    tenant = await get_by_token(tenant_id, cipher=cipher)
+    if tenant is None or tenant.base_url is None or tenant.signing_key is None:
+        return None
+    return TenantEndpoint(
+        tenant_id=tenant.id,
+        base_url=tenant.base_url,
+        token="",
+        signing_key=tenant.signing_key,
+    )
 
 
 app = FastAPI(
@@ -57,15 +117,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+errors.install(app)
 app.include_router(chat.router)
 app.include_router(polling.router)
 
 
 @app.get("/health", tags=["service"])
 async def health() -> dict[str, object]:
+    settings = get_settings()
     return {
         "status": "ok",
         "transport": getattr(app.state, "transport_mode", "unknown"),
+        "storage": settings.storage,
         "tools": len(TOOLS),
     }
 

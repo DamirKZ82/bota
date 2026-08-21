@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import uuid
-
+import structlog
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from orchestrator.api.deps import AgentDep, TenantDep
-from orchestrator.llm.base import Turn
-from orchestrator.masking.masker import MaskingSession
+from orchestrator.api.deps import AgentDep, SettingsDep, StoreDep, TenantDep
+from orchestrator.db.repo import journal
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
-
-# Диалоги в памяти процесса. Переезжают в Postgres вместе с журналом —
-# многопроцессному оркестратору общая память не подходит.
-_DIALOGS: dict[str, list[Turn]] = {}
-_MASKING: dict[str, MaskingSession] = {}
+log = structlog.get_logger(__name__)
 
 
 class AskRequest(BaseModel):
@@ -24,6 +18,10 @@ class AskRequest(BaseModel):
     dialog_id: str | None = Field(
         default=None,
         description="ID диалога; не указан — начинается новый",
+    )
+    user_key: str = Field(
+        default="unknown",
+        description="Идентификатор пользователя 1С — попадает в журнал",
     )
     allow_write_plans: bool = Field(
         default=True,
@@ -35,6 +33,7 @@ class ToolCallView(BaseModel):
     tool: str
     onec_method: str
     ok: bool
+    duration_ms: int
 
 
 class AskResponse(BaseModel):
@@ -46,13 +45,22 @@ class AskResponse(BaseModel):
 
 
 @router.post("/ask", response_model=AskResponse)
-async def ask(request: AskRequest, tenant: TenantDep, agent: AgentDep) -> AskResponse:
-    dialog_id = request.dialog_id or str(uuid.uuid4())
-    history = _DIALOGS.get(dialog_id, [])
-    masking = _MASKING.setdefault(
-        dialog_id,
-        MaskingSession(enabled=tenant.masking_enabled),
+async def ask(
+    request: AskRequest,
+    tenant: TenantDep,
+    agent: AgentDep,
+    store: StoreDep,
+    settings: SettingsDep,
+) -> AskResponse:
+    dialog_id = await store.open(
+        tenant_id=tenant.id, user_key=request.user_key, dialog_id=request.dialog_id
     )
+    history, masking = await store.load(
+        tenant_id=tenant.id,
+        dialog_id=dialog_id,
+        masking_enabled=tenant.masking_enabled,
+    )
+    already_saved = len(history)
 
     result, turns = await agent.run(
         tenant_id=tenant.id,
@@ -61,13 +69,47 @@ async def ask(request: AskRequest, tenant: TenantDep, agent: AgentDep) -> AskRes
         masking=masking,
         allow_write_plans=request.allow_write_plans,
     )
-    _DIALOGS[dialog_id] = turns
+
+    await store.save(
+        tenant_id=tenant.id,
+        dialog_id=dialog_id,
+        turns=turns,
+        already_saved=already_saved,
+        masking=masking,
+    )
+
+    if settings.storage == "postgres":
+        for call in result.calls:
+            await journal.record_tool_call(
+                tenant_id=tenant.id,
+                dialog_id=dialog_id,
+                user_key=request.user_key,
+                tool_name=call.tool,
+                onec_method=call.onec_method,
+                arguments=call.arguments,
+                ok=call.ok,
+                duration_ms=call.duration_ms,
+                error_message=call.error_message,
+            )
+
+    log.info(
+        "dialog_answered",
+        tenant_id=tenant.id,
+        dialog_id=dialog_id,
+        calls=len(result.calls),
+        truncated=result.truncated,
+    )
 
     return AskResponse(
         dialog_id=dialog_id,
         text=result.text,
         calls=[
-            ToolCallView(tool=c.tool, onec_method=c.onec_method, ok=c.ok)
+            ToolCallView(
+                tool=c.tool,
+                onec_method=c.onec_method,
+                ok=c.ok,
+                duration_ms=c.duration_ms,
+            )
             for c in result.calls
         ],
         truncated=result.truncated,
@@ -76,7 +118,6 @@ async def ask(request: AskRequest, tenant: TenantDep, agent: AgentDep) -> AskRes
 
 
 @router.delete("/{dialog_id}", status_code=204)
-async def close_dialog(dialog_id: str, tenant: TenantDep) -> None:
-    """Закрыть диалог и стереть словарь псевдонимов сессии."""
-    _DIALOGS.pop(dialog_id, None)
-    _MASKING.pop(dialog_id, None)
+async def close_dialog(dialog_id: str, tenant: TenantDep, store: StoreDep) -> None:
+    """Закрыть диалог и стереть словарь псевдонимов, не дожидаясь ретеншна."""
+    await store.close(tenant_id=tenant.id, dialog_id=dialog_id)

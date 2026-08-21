@@ -51,8 +51,12 @@ class ToolExecutor:
         if spec is None:
             return _error(tool_name, f"Инструмента «{tool_name}» не существует")
 
+        # Модель работает в псевдонимах, 1С — в реальных значениях. Перевод
+        # обратно делается до валидации: иначе «БИН_1» не пройдёт проверку длины.
+        real_arguments = masking.unmask_arguments(arguments)
+
         try:
-            request = spec.input_model.model_validate(arguments)
+            request = spec.input_model.model_validate(real_arguments)
         except ValidationError as exc:
             # Ошибку валидации отдаём модели: она может исправить параметры сама.
             return _error(tool_name, f"Неверные параметры: {_short(exc)}")
@@ -70,7 +74,8 @@ class ToolExecutor:
             # Это не ошибка модели, а рассинхрон контракта с расширением.
             return _error(
                 tool_name,
-                f"База вернула ответ, не соответствующий контракту «{spec.onec_method}»: {_short(exc)}",
+                f"База вернула ответ, не соответствующий контракту "
+                f"«{spec.onec_method}»: {_short(exc)}",
             )
 
         clean = json.loads(response.model_dump_json())

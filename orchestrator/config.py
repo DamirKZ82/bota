@@ -19,7 +19,29 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 16000
 
     # --- База данных ---
-    database_url: str = "postgresql+asyncpg://bota:bota@localhost:5432/bota"
+    database_url: str = "postgresql://bota:bota@localhost:5432/bota"
+
+    encryption_key: str | None = None
+    """Ключ AES-GCM в base64 для словаря псевдонимов и ключей подписи баз.
+
+    Обязателен, когда хранилище — Postgres. Генерация: openssl rand -base64 32.
+    """
+
+    transport: Literal["mock", "polling", "direct"] = "mock"
+    """Канал до 1С. `mock` — режим разработки: работает без базы 1С и без Postgres."""
+
+    @property
+    def storage(self) -> Literal["memory", "postgres"]:
+        """Хранилище выбирается транспортом, а не отдельным флагом.
+
+        Так нельзя случайно уехать в прод с диалогами в памяти: рабочие режимы
+        транспорта всегда тянут за собой Postgres.
+        """
+        return "memory" if self.transport == "mock" else "postgres"
+
+    # --- Ретеншн ---
+    dialog_retention_days: int = 30
+    """Диалоги вместе со словарём псевдонимов живут заметно меньше журнала."""
 
     # --- Оркестратор ---
     max_tool_calls: int = 30

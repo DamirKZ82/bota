@@ -190,7 +190,10 @@ class MockTransport(OneCTransport):
                     "receipt": RECEIPT_REF,
                     "esf": ESF_REF,
                     "amount_impact": "0.01",
-                    "summary": "НДС в 1С 84,00 ₸, в ЭСФ 84,01 ₸ — построчное округление против округления от итога",
+                    "summary": (
+                        "НДС в 1С 84,00 ₸, в ЭСФ 84,01 ₸ — построчное округление "
+                        "против округления от итога"
+                    ),
                 },
                 {
                     "id": "disc-0002",
@@ -490,7 +493,10 @@ class MockTransport(OneCTransport):
             "changes": [],
             "affected_postings": [],
             "blocked": True,
-            "block_reason": "Период закрыт по 31.03.2026; документ от 14.05.2026 в открытом периоде — корректировка не требуется",
+            "block_reason": (
+                "Период закрыт по 31.03.2026; документ от 14.05.2026 в открытом "
+                "периоде — корректировка не требуется"
+            ),
             "requires_reposting": False,
         }
 

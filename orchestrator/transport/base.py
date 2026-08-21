@@ -39,7 +39,9 @@ class OneCTransport(ABC):
     """Канал вызова экспортных функций расширения."""
 
     @abstractmethod
-    async def call(self, tenant_id: str, onec_method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def call(
+        self, tenant_id: str, onec_method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Вызвать функцию расширения и вернуть её JSON-результат.
 
         Args:

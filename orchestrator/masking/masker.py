@@ -101,6 +101,38 @@ class MaskingSession:
             return text
         return _ALIAS_RE.sub(lambda m: self._reverse.get(m.group(0), m.group(0)), text)
 
+    def unmask_arguments(self, payload: Any) -> Any:
+        """Демаскирует аргументы вызова инструмента перед отправкой в 1С.
+
+        Модель видит данные в псевдонимах, поэтому и параметры формирует в них:
+        получив `bin: "БИН_1"`, следующим ходом она вызовет
+        `get_counterparty(bin="БИН_1")`. Без этой замены 1С получила бы псевдоним
+        вместо БИН, а до неё запрос вообще не дошёл бы — упал бы на валидации
+        контракта.
+        """
+        if not self.enabled or not self._reverse:
+            return payload
+        if isinstance(payload, dict):
+            return {k: self.unmask_arguments(v) for k, v in payload.items()}
+        if isinstance(payload, list):
+            return [self.unmask_arguments(v) for v in payload]
+        if isinstance(payload, str):
+            return self.unmask(payload)
+        return payload
+
+    def snapshot(self) -> dict[str, str]:
+        """Словарь «псевдоним → реальное значение» для сохранения в БД."""
+        return dict(self._reverse)
+
+    def restore(self, aliases: dict[str, str]) -> None:
+        """Восстановить словарь из БД, продолжив нумерацию с достигнутой."""
+        for alias, value in aliases.items():
+            self._reverse[alias] = value
+            self._forward[value] = alias
+            prefix, _, number = alias.rpartition("_")
+            if prefix and number.isdigit():
+                self._counters[prefix] = max(self._counters.get(prefix, 0), int(number))
+
     # -- внутреннее ---------------------------------------------------------
 
     def _walk(self, node: Any, key: str | None = None) -> Any:

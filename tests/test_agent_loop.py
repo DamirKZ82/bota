@@ -122,7 +122,11 @@ async def test_ответ_демаскируется_перед_выдачей_�
     provider = ScriptedProvider(
         [
             AssistantTurn(
-                blocks=[ToolUseBlock(id="tu_1", name="get_counterparty", input={"bin": "123456789012"})],
+                blocks=[
+                    ToolUseBlock(
+                        id="tu_1", name="get_counterparty", input={"bin": "123456789012"}
+                    )
+                ],
                 stop_reason="tool_use",
             ),
             AssistantTurn(
