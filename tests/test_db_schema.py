@@ -24,6 +24,7 @@ from orchestrator.db import pool as db_pool
 from orchestrator.db.crypto import Cipher
 from orchestrator.db.migrate import MIGRATIONS_DIR, discover, migrate
 from orchestrator.db.repo import dialogs, journal, poll_tasks, runs, tenants
+from orchestrator.errors import ErrorException
 from orchestrator.llm.base import AssistantTurn, TextBlock, UserTurn
 
 TEST_DSN = os.getenv("BOTA_TEST_DSN")
@@ -132,10 +133,17 @@ async def test_база_находится_по_токену_а_сам_токе�
 
 @requires_db
 async def test_прямой_транспорт_требует_адрес(db: None) -> None:
-    with pytest.raises(asyncpg.CheckViolationError):
+    """База в прямом режиме без адреса бессмысленна — ограничение ловит это в БД.
+
+    Наружу приходит ErrorException: query_db оборачивает любое падение SQL,
+    чтобы в errors_back попал и текст запроса, и трейсбек.
+    """
+    with pytest.raises(ErrorException) as err:
         await tenants.register(
             tenant_id="t2", name="Без адреса", token="t", transport="direct"
         )
+    assert isinstance(err.value.err, asyncpg.CheckViolationError)
+    assert "tenants_direct_needs_url" in str(err.value.err)
 
 
 @requires_db

@@ -40,10 +40,14 @@ Postgres не нужно, диалоги живут в памяти. Рабоч�
 Миграции применяются сами при старте; вручную — `python -m orchestrator.db.migrate`
 (`--with-optional` добавит таблицы базы знаний, требующие pgvector).
 
-Тесты БД включаются отдельной переменной, иначе пропускаются:
+Тесты БД идут на отдельной базе — они пересоздают схему целиком. Адрес берётся
+из `BOTA_TEST_DSN` в `.env`; без него такие тесты пропускаются, и `pytest` всё
+равно проходит.
+
+Зарегистрировать базу 1С (токен печатается один раз, в БД ложится только его хеш):
 
 ```bash
-BOTA_TEST_DSN=postgresql://postgres:пароль@localhost:5432/bota_test .venv/Scripts/python -m pytest
+.venv/Scripts/python -m orchestrator.db.register --id demo --name "Демо-база" --transport polling
 ```
 
 Проверить реестр инструментов: `GET /v1/tools` — эта же выдача служит спецификацией

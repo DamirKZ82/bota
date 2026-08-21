@@ -26,13 +26,27 @@ log = structlog.get_logger(__name__)
 _pool: asyncpg.Pool | None = None
 
 
+def normalize_dsn(url: str) -> str:
+    """Убирает драйвер из схемы: asyncpg понимает только postgresql://.
+
+    DATABASE_URL часто записывают в форме SQLAlchemy — `postgresql+psycopg://`,
+    `postgresql+asyncpg://`. Разбираться с этим один раз здесь дешевле, чем
+    ловить «invalid DSN» на старте у каждого, кто скопировал строку из другого
+    проекта.
+    """
+    scheme, separator, rest = url.partition("://")
+    if not separator:
+        return url
+    return f"{scheme.split('+', 1)[0]}{separator}{rest}"
+
+
 async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
     """Создать пул. Вызывается один раз в lifespan приложения."""
     global _pool
     if _pool is not None:
         return _pool
     _pool = await asyncpg.create_pool(
-        dsn=dsn,
+        dsn=normalize_dsn(dsn),
         min_size=min_size,
         max_size=max_size,
         init=_register_codecs,

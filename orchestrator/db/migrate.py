@@ -17,6 +17,7 @@ import asyncpg
 import structlog
 
 from orchestrator.config import get_settings
+from orchestrator.db.pool import normalize_dsn
 
 log = structlog.get_logger(__name__)
 
@@ -43,7 +44,7 @@ async def applied_versions(connection: asyncpg.Connection) -> set[str]:
 
 async def migrate(dsn: str, *, include_optional: bool = False) -> list[str]:
     """Применить недостающие миграции. Возвращает применённые версии."""
-    connection = await asyncpg.connect(dsn)
+    connection = await asyncpg.connect(normalize_dsn(dsn))
     try:
         done = await applied_versions(connection)
         newly_applied: list[str] = []
@@ -73,17 +74,10 @@ async def migrate(dsn: str, *, include_optional: bool = False) -> list[str]:
         await connection.close()
 
 
-def _dsn_for_asyncpg(url: str) -> str:
-    """DATABASE_URL хранится в форме SQLAlchemy; asyncpg ждёт postgresql://."""
-    return url.replace("postgresql+asyncpg://", "postgresql://")
-
-
 async def _main() -> None:
     settings = get_settings()
     include_optional = "--with-optional" in sys.argv
-    applied = await migrate(
-        _dsn_for_asyncpg(settings.database_url), include_optional=include_optional
-    )
+    applied = await migrate(settings.database_url, include_optional=include_optional)
     for version in applied:
         print(f"применена: {version}")
 
