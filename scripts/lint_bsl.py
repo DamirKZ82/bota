@@ -62,6 +62,7 @@ CODE_SUFFIX = re.compile(r"^[А-Яа-яЁё_]+(?:[A-Z]\d+)+$")
 ABBREVIATIONS = (
     "xml", "json", "html", "http", "https", "hex", "url", "uuid", "guid",
     "odata", "soap", "dom", "zip", "csv", "pdf", "sha", "md5", "base64", "id",
+    "uri", "url", "openssl", "ssl", "tls", "ftp", "smtp", "imap", "pop3", "dbf",
 )
 
 
