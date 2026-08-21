@@ -57,6 +57,21 @@ ALLOWED_MIXED = {"естьnull"}
 #: Коды в ТЗ записаны латиницей, поэтому такое смешение осмысленно.
 CODE_SUFFIX = re.compile(r"^[А-Яа-яЁё_]+(?:[A-Z]\d+)+$")
 
+#: Аббревиатуры, которые в именах платформы пишутся латиницей:
+#: ПолучитьHexСтрокуИзДвоичныхДанных, ЗначениеВСтрокуXML, HTTPСоединение.
+ABBREVIATIONS = (
+    "xml", "json", "html", "http", "https", "hex", "url", "uuid", "guid",
+    "odata", "soap", "dom", "zip", "csv", "pdf", "sha", "md5", "base64", "id",
+)
+
+
+def known_abbreviation_only(word: str) -> bool:
+    """True, если латиница в слове — только известные аббревиатуры."""
+    rest = word.lower()
+    for abbreviation in sorted(ABBREVIATIONS, key=len, reverse=True):
+        rest = rest.replace(abbreviation, "")
+    return not LATIN.search(rest)
+
 
 def logical_lines(lines: list[str]) -> list[tuple[int, str]]:
     """Склеивает физические строки в логические, выбрасывая литералы и комментарии.
@@ -119,7 +134,11 @@ def check_mixed_alphabet(path: Path, lines: list[tuple[int, str]]) -> list[str]:
     problems: list[str] = []
     for number, code in lines:
         for word in IDENTIFIER.findall(code):
-            if word.lower() in ALLOWED_MIXED or CODE_SUFFIX.match(word):
+            if (
+                word.lower() in ALLOWED_MIXED
+                or CODE_SUFFIX.match(word)
+                or known_abbreviation_only(word)
+            ):
                 continue
             if CYRILLIC.search(word) and LATIN.search(word):
                 problems.append(
