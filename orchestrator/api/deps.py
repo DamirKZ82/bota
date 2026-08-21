@@ -16,6 +16,7 @@ from orchestrator.config import Settings, get_settings
 from orchestrator.db.repo.tenants import Tenant
 from orchestrator.db.repo.tenants import get_by_token as get_tenant_by_token
 from orchestrator.errors import WarnException
+from orchestrator.progress import ProgressStore
 from orchestrator.store import DialogStore
 
 #: Демо-база для режима разработки (transport=mock), когда Postgres не поднят.
@@ -59,7 +60,12 @@ def get_store(request: Request) -> DialogStore:
     return request.app.state.store  # type: ignore[no-any-return]
 
 
+def get_progress(request: Request) -> ProgressStore:
+    return request.app.state.progress  # type: ignore[no-any-return]
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 TenantDep = Annotated[Tenant, Depends(resolve_tenant)]
 AgentDep = Annotated[AgentLoop, Depends(get_agent)]
 StoreDep = Annotated[DialogStore, Depends(get_store)]
+ProgressDep = Annotated[ProgressStore, Depends(get_progress)]

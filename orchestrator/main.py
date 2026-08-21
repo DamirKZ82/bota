@@ -24,9 +24,11 @@ from orchestrator.config import get_settings
 from orchestrator.db.crypto import Cipher
 from orchestrator.db.migrate import migrate
 from orchestrator.db.pool import close_pool, init_pool
+from orchestrator.db.repo.chat_requests import PgProgressStore
 from orchestrator.db.repo.tenants import get_by_token
 from orchestrator.errors import ErrorException
 from orchestrator.llm.anthropic_provider import AnthropicProvider
+from orchestrator.progress import MemoryProgressStore, ProgressStore
 from orchestrator.store import DialogStore, MemoryDialogStore, PgDialogStore
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.tools.registry import TOOLS
@@ -55,9 +57,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await migrate(settings.database_url)
         await init_pool(settings.database_url)
         store: DialogStore = PgDialogStore()
+        progress: ProgressStore = PgProgressStore()
     else:
         app.state.cipher = None
         store = MemoryDialogStore()
+        progress = MemoryProgressStore()
 
     transport = _build_transport(settings.transport, settings.tool_timeout_seconds)
     if settings.transport == "polling":
@@ -75,6 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         effort=settings.llm_effort,
     )
     app.state.store = store
+    app.state.progress = progress
     app.state.transport_mode = settings.transport
 
     log.info("orchestrator_started", transport=settings.transport, storage=settings.storage)

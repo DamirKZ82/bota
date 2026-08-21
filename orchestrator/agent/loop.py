@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -25,6 +26,7 @@ from orchestrator.llm.base import (
     Turn,
     UserTurn,
 )
+from orchestrator.progress import ANSWERING, label_for
 from orchestrator.tools.enums import ErrorCode
 from orchestrator.tools.envelope import CallContext
 from orchestrator.tools.executor import ToolExecutor
@@ -41,6 +43,11 @@ class ToolCallRecord:
     duration_ms: int = 0
     error_code: ErrorCode | None = None
     plans: tuple[tuple[str, str], ...] = ()
+
+
+#: Куда сообщать текущий шаг: (номер шага, метка для пользователя, инструмент).
+#: Цикл не знает, кто слушает — форма 1С, лог или никто.
+StepReporter = Callable[[int, str, str | None], Awaitable[None]]
 
 
 @dataclass
@@ -75,6 +82,7 @@ class AgentLoop:
         context: CallContext,
         history: list[Turn] | None = None,
         allow_write_plans: bool = True,
+        on_step: StepReporter | None = None,
     ) -> tuple[AgentResult, list[Turn]]:
         """Отработать один запрос пользователя.
 
@@ -150,6 +158,10 @@ class AgentLoop:
 
             results: list[ToolResultBlock] = []
             for use in tool_uses:
+                if on_step is not None:
+                    # Метка ставится ДО вызова: пользователь должен видеть, чем
+                    # агент занят сейчас, а не чем занимался только что.
+                    await on_step(len(calls) + 1, label_for(use.name), use.name)
                 outcome = await self._executor.execute(
                     tenant_id=tenant_id,
                     tool_name=use.name,
@@ -177,6 +189,9 @@ class AgentLoop:
             # Все результаты — одним пользовательским ходом; дробить их нельзя,
             # иначе модель перестанет вызывать инструменты параллельно.
             turns.append(UserTurn(tool_results=results))
+
+            if on_step is not None:
+                await on_step(len(calls), ANSWERING, None)
 
         return (
             AgentResult(

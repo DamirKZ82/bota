@@ -22,7 +22,7 @@ import pytest
 
 from orchestrator.db import pool as db_pool
 from orchestrator.db.crypto import Cipher
-from orchestrator.db.migrate import MIGRATIONS_DIR, discover, migrate
+from orchestrator.db.migrate import MIGRATIONS_DIR, OPTIONAL, discover, migrate
 from orchestrator.db.repo import dialogs, journal, poll_tasks, runs, tenants
 from orchestrator.errors import ErrorException
 from orchestrator.llm.base import AssistantTurn, TextBlock, UserTurn
@@ -97,8 +97,11 @@ def cipher() -> Cipher:
 
 @requires_db
 async def test_миграции_применяются_на_чистой_базе(db: None) -> None:
+    """Применяются все обязательные; 0002_knowledge помечена как optional."""
     rows = await db_pool.query_db("SELECT version FROM schema_migrations ORDER BY version")
-    assert [row["version"] for row in rows] == ["0001_init"]
+    applied = [row["version"] for row in rows]
+    assert applied == [v for v, _ in discover() if v not in OPTIONAL]
+    assert "0002_knowledge" not in applied
 
 
 @requires_db
