@@ -241,8 +241,145 @@ class MockTransport(OneCTransport):
         }
 
     def _list_discrepancies(self, args: dict[str, Any]) -> dict[str, Any]:
+        items = self._all_discrepancies()
+
+        # Фильтры применяются по-настоящему: иначе агент видит один и тот же
+        # список на любой отбор и тратит вызовы, пытаясь его сузить.
+        if args.get("codes"):
+            items = [i for i in items if i["code"] in args["codes"]]
+        if args.get("severity"):
+            items = [i for i in items if i["severity"] in args["severity"]]
+        if args.get("pattern"):
+            items = [i for i in items if i["pattern"] in args["pattern"]]
+        if args.get("status"):
+            items = [i for i in items if i["status"] in args["status"]]
+        if args.get("counterparty"):
+            items = [
+                i
+                for i in items
+                if i["counterparty"] and i["counterparty"]["ref"]["uuid"] == args["counterparty"]
+            ]
+
+        page = args.get("page", 1)
+        page_size = args.get("page_size", 50)
+        start = (page - 1) * page_size
+        window = items[start : start + page_size]
+
         return {
-            "items": [
+            "items": window,
+            "page": page,
+            "page_size": page_size,
+            "total": len(items),
+            "has_more": start + page_size < len(items),
+        }
+
+    def _all_discrepancies(self) -> list[dict[str, Any]]:
+        """Полный список расхождений расчёта.
+
+        Количество совпадает со сводкой `reconcile_period` — иначе агент видит
+        «4 ЭСФ без поступлений» в сводке и одну карточку в списке, считает это
+        сбоем выдачи и начинает предлагать бессмысленный пересчёт.
+
+        Три первые карточки — «богатые», с деталями под get_discrepancy.
+        Остальные добираются однотипными: для проверки пагинации и фильтров
+        этого достаточно.
+        """
+        return [*self._detailed_discrepancies(), *self._bulk_discrepancies()]
+
+    def _bulk_discrepancies(self) -> list[dict[str, Any]]:
+        """Массовка: доводит список до количеств из сводки."""
+        filler: list[dict[str, Any]] = []
+
+        # D14 / R1 — 37 копеечных по сводке, одно уже есть в детальных.
+        for index in range(1, 37):
+            filler.append(
+                self._brief(
+                    disc_id=f"d14-{index:04d}",
+                    code="D14",
+                    severity="info",
+                    pattern="R1" if index <= 28 else ("R2" if index <= 31 else "R6"),
+                    vat="0.01",
+                    short="Копеечное расхождение НДС в пределах допуска (округление)",
+                )
+            )
+
+        # D03 — 4 по сводке, одно детальное.
+        for index in range(1, 4):
+            filler.append(
+                self._brief(
+                    disc_id=f"d03-{index:04d}",
+                    code="D03",
+                    severity="high",
+                    pattern=None,
+                    vat="46080.00",
+                    short="ЭСФ без поступления в базе",
+                )
+            )
+
+        # D06 — 3 по сводке, одно детальное.
+        for index in range(1, 3):
+            filler.append(
+                self._brief(
+                    disc_id=f"d06-{index:04d}",
+                    code="D06",
+                    severity="high",
+                    pattern="R2",
+                    vat="0.00",
+                    short="Расхождение суммы НДС выше допуска",
+                )
+            )
+
+        # D02 — 2 поступления без ЭСФ, срок выписки истёк.
+        for index in range(1, 3):
+            filler.append(
+                self._brief(
+                    disc_id=f"d02-{index:04d}",
+                    code="D02",
+                    severity="high",
+                    pattern=None,
+                    vat="28000.00",
+                    short="Поступление без ЭСФ, срок выписки истёк",
+                )
+            )
+
+        # D16 — одно непроведённое поступление.
+        filler.append(
+            self._brief(
+                disc_id="d16-0001",
+                code="D16",
+                severity="medium",
+                pattern=None,
+                vat="0.00",
+                short="Поступление не проведено",
+            )
+        )
+        return filler
+
+    @staticmethod
+    def _brief(
+        *,
+        disc_id: str,
+        code: str,
+        severity: str,
+        pattern: str | None,
+        vat: str,
+        short: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": disc_id,
+            "code": code,
+            "severity": severity,
+            "status": "open",
+            "pattern": pattern,
+            "counterparty": {"ref": CP_REF, "bin": "123456789012"},
+            "receipt": None,
+            "esf": None,
+            "diff": {"net": "0.00", "vat": vat, "total": "0.00"},
+            "short": short,
+        }
+
+    def _detailed_discrepancies(self) -> list[dict[str, Any]]:
+        return [
                 {
                     "id": "b7c8d9e0f1a2b3c4",
                     "code": "D06",
@@ -318,12 +455,7 @@ class MockTransport(OneCTransport):
                     "diff": {"net": "-384000.00", "vat": "-61440.00", "total": "-445440.00"},
                     "short": "ЭСФ на 445 440,00 ₸ без поступления в базе",
                 },
-            ],
-            "page": args.get("page", 1),
-            "page_size": args.get("page_size", 50),
-            "total": 3,
-            "has_more": False,
-        }
+            ]
 
     def _get_discrepancy(self, args: dict[str, Any]) -> dict[str, Any]:
         card_id = args.get("id")
