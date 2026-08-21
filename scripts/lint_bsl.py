@@ -203,7 +203,11 @@ def check_exports(paths: list[Path]) -> list[str]:
     for path in paths:
         for number, code in logical_lines(path.read_text(encoding="utf-8").splitlines()):
             for module, method in re.findall(
-                r"\b(Бота[A-Za-zА-Яа-яЁё0-9_]*)\.([A-Za-zА-Яа-яЁё0-9_]+)\s*\(", code
+                # Просмотр назад: «РегистрыСведений.БотаПланы.…» — обращение
+                # к регистру, а не вызов общего модуля.
+                r"(?<![\w.])(Бота[A-Za-zА-Яа-яЁё0-9_]*)"
+                r"\.([A-Za-zА-Яа-яЁё0-9_]+)\s*\(",
+                code,
             ):
                 if module == path.stem or module not in declared:
                     continue  # модуль ещё не написан — это нормально по ходу работы
