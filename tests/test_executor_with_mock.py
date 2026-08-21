@@ -15,45 +15,11 @@ from orchestrator.tools.enums import ErrorCode
 from orchestrator.tools.envelope import CallContext, ToolRequest, ToolResponse
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.tools.registry import TOOLS
+from orchestrator.tools.samples import SAMPLE_ARGS as ARGS
 from orchestrator.transport.base import OneCTransport, TransportTimeout
 from orchestrator.transport.mock import MockTransport
 
 CONTEXT = CallContext(user_id="user-1", session_id="session-1", masking=False)
-
-#: Параметры, с которыми каждый инструмент вызывается в тесте.
-ARGS: dict[str, dict[str, object]] = {
-    "get_context": {},
-    "reconcile_period": {
-        "organization": "org-0001",
-        "from": "2026-04-01",
-        "to": "2026-06-30",
-    },
-    "list_discrepancies": {"calc_id": "calc-2026q2-0001"},
-    "get_discrepancy": {"id": "d1a2b3c4e5f6a7b8"},
-    "get_document": {"uuid": "doc-receipt-145"},
-    "find_esf_candidates": {"receipt_uuid": "doc-receipt-145"},
-    "find_receipt_candidates": {"esf_uuid": "doc-esf-9042"},
-    "get_counterparty": {"bin": "123456789012"},
-    "get_vat_turnover": {
-        "organization": "org-0001",
-        "from": "2026-04-01",
-        "to": "2026-06-30",
-    },
-    "get_journal": {"from": "2026-04-01", "to": "2026-06-30"},
-    "plan_set_link": {"receipt_uuid": "doc-receipt-145", "esf_uuid": "doc-esf-8891"},
-    "plan_adjust_lines": {"discrepancy_id": "d1a2b3c4e5f6a7b8"},
-    "plan_set_vat_mode": {"receipt_uuid": "doc-receipt-208", "vat_included": False},
-    "plan_create_correction": {
-        "discrepancy_id": "b7c8d9e0f1a2b3c4",
-        "reason": "закрытый период",
-    },
-    "plan_create_receipt_from_esf": {"esf_uuid": "doc-esf-9042"},
-    "plan_create_receipts_bulk": {"esf_uuids": ["doc-esf-9042"]},
-    "mark_reviewed": {"discrepancy_id": "d1a2b3c4e5f6a7b8", "comment": "принято"},
-    "get_settings": {},
-    "open_object": {"uuid": "doc-esf-8891"},
-}
-
 
 @pytest.fixture
 def executor() -> ToolExecutor:
