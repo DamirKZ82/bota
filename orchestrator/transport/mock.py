@@ -1,571 +1,884 @@
 """Мок-транспорт: правдоподобные данные вместо реальной базы 1С.
 
-Нужен, чтобы оркестратор, цикл агента и форма ответа отлаживались до того, как
-появится расширение. Данные подобраны так, чтобы воспроизводить два реальных
-кейса из ТЗ:
+Нужен, чтобы оркестратор, цикл агента и формат ответа отлаживались до появления
+расширения. Данные подобраны так, чтобы воспроизводить три кейса из ТЗ:
 
-* **R1 / D14** — построчное округление НДС против округления от итога. Три строки
-  дают в сумме 84,00 ₸ построчно и 84,01 ₸ от итога: ровно тот тиын, который
+* **D14 / R1** — построчное округление НДС против округления от итога. Три строки
+  дают 112,00 ₸ построчно и 112,01 ₸ от итога: ровно тот тиын, который
   накапливается и вылезает в декларации.
-* **D03** — ЭСФ без поступления, по которой агент должен предложить черновик.
+* **D06 / R2** — в поступлении стоит «сумма включает НДС», а поставщик выписал
+  ЭСФ с НДС сверху. Итоги расходятся на 2 648,28 ₸.
+* **D03** — ЭСФ без поступления, по которой агент готовит черновик, где одна
+  строка требует ручного выбора номенклатуры.
 
-Заменяется на DirectTransport / PollingTransport без изменений в цикле агента.
+Ставка НДС — 16 %, как в примерах Приложения А. Все суммы пересчитаны и сходятся.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 from typing import Any
 
-from orchestrator.transport.base import OneCTransport, ToolCallError
+from orchestrator.tools.enums import ErrorCode
+from orchestrator.tools.envelope import ToolRequest, ToolResponse
+from orchestrator.transport.base import OneCTransport
 
-ORG = {
+VAT_RATE = "16"
+
+ORG_REF = {
+    "type": "Справочник.Организации",
     "uuid": "org-0001",
-    "name": "ТОО «Пилот Аутсорс»",
-    "bin": "010203040506",
-    "is_vat_payer": True,
-    "accounting_currency": "KZT",
+    "presentation": "ТОО «Пилот Аутсорс»",
+    "nav": "e1cib/data/Справочник.Организации?ref=org-0001",
 }
 
-COUNTERPARTY = {
+CP_REF = {
+    "type": "Справочник.Контрагенты",
     "uuid": "cp-0001",
-    "name": "ТОО «Снабженец»",
-    "bin": "123456789012",
+    "presentation": "ТОО «Снабженец»",
+    "nav": "e1cib/data/Справочник.Контрагенты?ref=cp-0001",
 }
 
-COUNTERPARTY_2 = {
+CP2_REF = {
+    "type": "Справочник.Контрагенты",
     "uuid": "cp-0002",
-    "name": "ИП Ахметов",
-    "bin": "880101300123",
+    "presentation": "ИП Ахметов",
+    "nav": "e1cib/data/Справочник.Контрагенты?ref=cp-0002",
 }
 
 RECEIPT_REF = {
-    "kind": "ПоступлениеТМЗиУслуг",
+    "type": "Документ.ПоступлениеТМЗИУслуг",
     "uuid": "doc-receipt-145",
-    "number": "145",
-    "date": "2026-05-14",
-    "presentation": "Поступление ТМЗ и услуг № 145 от 14.05.2026",
-    "navigation_link": "e1cib/data/Документ.ПоступлениеТМЗиУслуг?ref=doc-receipt-145",
+    "presentation": "Поступление ТМЗ и услуг 000145 от 14.05.2026",
+    "nav": "e1cib/data/Документ.ПоступлениеТМЗИУслуг?ref=doc-receipt-145",
+}
+
+RECEIPT_R2_REF = {
+    "type": "Документ.ПоступлениеТМЗИУслуг",
+    "uuid": "doc-receipt-208",
+    "presentation": "Поступление ТМЗ и услуг 000208 от 22.05.2026",
+    "nav": "e1cib/data/Документ.ПоступлениеТМЗИУслуг?ref=doc-receipt-208",
 }
 
 ESF_REF = {
-    "kind": "ЭСФПолученный",
+    "type": "Документ.СчетФактураПолученный",
     "uuid": "doc-esf-8891",
-    "number": "8891",
-    "date": "2026-05-15",
-    "presentation": "ЭСФ (полученный) № 8891 от 15.05.2026",
-    "navigation_link": "e1cib/data/Документ.ЭСФПолученный?ref=doc-esf-8891",
+    "presentation": "ЭСФ (полученный) 8891 от 15.05.2026",
+    "nav": "e1cib/data/Документ.СчетФактураПолученный?ref=doc-esf-8891",
 }
 
-ESF_NO_RECEIPT_REF = {
-    "kind": "ЭСФПолученный",
+ESF_R2_REF = {
+    "type": "Документ.СчетФактураПолученный",
+    "uuid": "doc-esf-8934",
+    "presentation": "ЭСФ (полученный) 8934 от 23.05.2026",
+    "nav": "e1cib/data/Документ.СчетФактураПолученный?ref=doc-esf-8934",
+}
+
+ESF_ORPHAN_REF = {
+    "type": "Документ.СчетФактураПолученный",
     "uuid": "doc-esf-9042",
-    "number": "9042",
-    "date": "2026-06-03",
-    "presentation": "ЭСФ (полученный) № 9042 от 03.06.2026",
-    "navigation_link": "e1cib/data/Документ.ЭСФПолученный?ref=doc-esf-9042",
+    "presentation": "ЭСФ (полученный) 9042 от 03.06.2026",
+    "nav": "e1cib/data/Документ.СчетФактураПолученный?ref=doc-esf-9042",
 }
 
 
 def _line(
-    number: int,
+    n: int,
     name: str,
-    uom: str,
+    unit: str,
     qty: str,
     price: str,
     net: str,
     vat: str,
-    gross: str,
+    total: str,
+    item_uuid: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "number": number,
-        "item_name": name,
-        "item_uuid": f"item-{number:04d}",
-        "uom": uom,
-        "quantity": qty,
+    line: dict[str, Any] = {
+        "n": n,
+        "name": name,
+        "unit": unit,
+        "qty": qty,
         "price": price,
-        "amount_net": net,
-        "vat_rate": "12",
-        "amount_vat": vat,
-        "amount_gross": gross,
+        "net": net,
+        "vat_rate": VAT_RATE,
+        "vat": vat,
+        "total": total,
     }
+    if item_uuid:
+        line["item"] = {
+            "type": "Справочник.Номенклатура",
+            "uuid": item_uuid,
+            "presentation": name,
+            "nav": f"e1cib/data/Справочник.Номенклатура?ref={item_uuid}",
+        }
+    return line
 
 
-# Построчный НДС: 12,00 + 24,00 + 48,00 = 84,00.
-# НДС от итога:  700,06 × 12 % = 84,0072 → 84,01. Разница — тот самый тиын.
+# Построчный НДС: 16,00 + 32,00 + 64,00 = 112,00.
+# НДС от итога:  700,06 × 16 % = 112,0096 → 112,01. Разница — тот самый тиын.
 RECEIPT_LINES = [
-    _line(1, "Бумага А4 «Снегурочка»", "пачка", "7", "14.29", "100.03", "12.00", "112.03"),
-    _line(2, "Картридж HP CF217A", "шт", "3", "66.67", "200.01", "24.00", "224.01"),
-    _line(3, "Бумага для флипчарта", "рулон", "6", "66.67", "400.02", "48.00", "448.02"),
+    _line(1, "Бумага А4 «Снегурочка»", "пач", "7.000", "14.29",
+          "100.03", "16.00", "116.03", "item-0001"),
+    _line(2, "Картридж HP CF217A", "шт", "3.000", "66.67",
+          "200.01", "32.00", "232.01", "item-0002"),
+    _line(3, "Бумага для флипчарта", "рул", "6.000", "66.67",
+          "400.02", "64.00", "464.02", "item-0003"),
 ]
 
 ESF_LINES = [
-    _line(1, "Бумага А4 Снегурочка", "пачка", "7", "14.29", "100.03", "12.00", "112.03"),
-    _line(2, "Картридж HP CF217A", "шт", "3", "66.67", "200.01", "24.00", "224.01"),
-    _line(3, "Бумага для флипчарта", "рулон", "6", "66.67", "400.02", "48.01", "448.03"),
+    _line(1, "Бумага офисная А4 «Снегурочка»", "пач", "7.000", "14.29",
+          "100.03", "16.00", "116.03"),
+    _line(2, "Картридж HP CF217A", "шт", "3.000", "66.67",
+          "200.01", "32.00", "232.01"),
+    _line(3, "Бумага для флипчарта 80 г/м2", "рул", "6.000", "66.67",
+          "400.02", "64.01", "464.03"),
+]
+
+# R2: в поступлении цена 1 200,00 включает НДС (120 000 / 1,16 = 103 448,28),
+# в ЭСФ та же цена взята как цена без НДС (120 000 × 16 % = 19 200,00).
+RECEIPT_R2_LINES = [
+    _line(1, "Кабель ВВГнг 3х2.5", "м", "100.000", "1200.00",
+          "103448.28", "16551.72", "120000.00", "item-2001"),
+]
+
+ESF_R2_LINES = [
+    _line(1, "Кабель ВВГнг 3х2.5", "м", "100.000", "1200.00",
+          "120000.00", "19200.00", "139200.00"),
 ]
 
 
 class MockTransport(OneCTransport):
-    """Отдаёт фиксированные ответы по имени метода 1С."""
+    """Отдаёт фиксированные ответы по имени инструмента, в конверте A.0.2."""
 
-    async def call(
-        self, tenant_id: str, onec_method: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
-        handler = getattr(self, f"_{onec_method}", None)
+    async def call(self, tenant_id: str, request: ToolRequest) -> ToolResponse:
+        handler = getattr(self, f"_{request.tool}", None)
         if handler is None:
-            raise ToolCallError(f"Мок не умеет «{onec_method}»")
-        return handler(params)  # type: ignore[no-any-return]
+            return ToolResponse.failure(
+                request.tool,
+                ErrorCode.NOT_SUPPORTED_RELEASE,
+                f"Мок не умеет «{request.tool}»",
+            )
+        return ToolResponse(
+            ok=True,
+            tool=request.tool,
+            duration_ms=12,
+            result=handler(request.args),
+        )
 
     # -- чтение -------------------------------------------------------------
 
-    def _ПолучитьКонтекст(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _get_context(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
-            "organizations": [ORG],
-            "current_period": {"date_from": "2026-04-01", "date_to": "2026-06-30"},
-            "closed_until": "2026-03-31",
-            "configuration_version": "3.0.52.14",
-            "platform_version": "8.3.24.1548",
-            "accounting_currency": "KZT",
-            "tolerances": {
-                "line_per_unit": "0.01",
-                "line_cap": "1.00",
-                "document_per_line": "0.01",
-                "document_cap": "5.00",
-                "period_material": "1.00",
+            "base": {
+                "name": "ТОО «Пилот Аутсорс» (основная)",
+                "config": "Бухгалтерия для Казахстана",
+                "config_version": "3.0.52.14",
+                "platform": "8.3.24.1548",
+                "currency": "KZT",
+                "extension_version": "0.1.0",
             },
-        }
-
-    def _СверитьПериод(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "period": params["period"],
-            "organization": ORG,
-            "pairs_total": 118,
-            "receipts_total": 124,
-            "esf_total": 121,
-            "by_code": [
+            "organizations": [
                 {
-                    "code": "D14",
-                    "description": "Копеечное расхождение в допуске (см. R1–R6)",
-                    "severity": "инфо",
-                    "count": 37,
-                    "amount_impact": "3.47",
-                },
-                {
-                    "code": "D03",
-                    "description": "ЭСФ без поступления",
-                    "severity": "высокая",
-                    "count": 4,
-                    "amount_impact": "184320.00",
-                },
-                {
-                    "code": "D02",
-                    "description": "Поступление без ЭСФ (срок истёк)",
-                    "severity": "высокая",
-                    "count": 2,
-                    "amount_impact": "56000.00",
-                },
-                {
-                    "code": "D16",
-                    "description": "Поступление не проведено",
-                    "severity": "средняя",
-                    "count": 1,
-                    "amount_impact": "0.00",
-                },
+                    "ref": ORG_REF,
+                    "bin": "010203040506",
+                    "vat_payer": True,
+                    "forbid_date": "2026-03-31",
+                }
             ],
-            "rounding_total": "3.47",
-            "discrepancy_ids": ["disc-0001", "disc-0002", "disc-0003"],
-            "computed_at": dt.datetime(2026, 7, 1, 9, 30).isoformat(),
-            "from_cache": False,
+            "current_period": {"from": "2026-04-01", "to": "2026-06-30", "kind": "quarter"},
+            "settings": self._settings(),
+            "permissions": {"read": True, "apply": True, "create": True},
         }
 
-    def _ПолучитьСписокРасхождений(self, params: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _settings() -> dict[str, Any]:
+        return {
+            "line_tolerance_per_unit": "0.01",
+            "line_tolerance_max": "1.00",
+            "doc_tolerance_per_line": "0.01",
+            "doc_tolerance_max": "5.00",
+            "period_tolerance_total": "1.00",
+            "esf_tail_days": 20,
+            "candidate_days": 10,
+        }
+
+    def _reconcile_period(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "calc_id": "calc-2026q2-0001",
+            "calculated_at": "2026-07-01T09:30:00",
+            "from_cache": False,
+            "scope": {
+                "receipts_total": 124,
+                "receipts_unposted": 1,
+                "esf_total": 121,
+                "pairs_linked": 104,
+                "pairs_suggested": 14,
+                "receipts_without_esf": 6,
+                "esf_without_receipt": 4,
+            },
+            "summary_by_code": [
+                {"code": "D14", "severity": "info", "count": 37, "amount_vat": "3.47"},
+                {"code": "D03", "severity": "high", "count": 4, "amount_vat": "184320.00"},
+                {"code": "D06", "severity": "high", "count": 3, "amount_vat": "2648.28"},
+                {"code": "D02", "severity": "high", "count": 2, "amount_vat": "56000.00"},
+                {"code": "D16", "severity": "medium", "count": 1, "amount_vat": "0.00"},
+            ],
+            "rounding": {
+                "total_diff_vat": "3.47",
+                "total_diff_net": "-1.12",
+                "by_pattern": [
+                    {"pattern": "R1", "count": 29, "diff_vat": "2.90"},
+                    {"pattern": "R2", "count": 3, "diff_vat": "0.44"},
+                    {"pattern": "R6", "count": 5, "diff_vat": "0.13"},
+                ],
+            },
+            "vat_totals": {
+                "receipts_vat": "5241877.12",
+                "esf_vat": "5241880.59",
+                "diff": "3.47",
+                "ledger_vat_1420": "5241877.12",
+            },
+            "top_discrepancies": ["d1a2b3c4e5f6a7b8", "b7c8d9e0f1a2b3c4", "c4d5e6f7a8b9c0d1"],
+        }
+
+    def _list_discrepancies(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
             "items": [
                 {
-                    "id": "disc-0001",
-                    "code": "D14",
-                    "severity": "инфо",
-                    "counterparty_name": COUNTERPARTY["name"],
-                    "receipt": RECEIPT_REF,
-                    "esf": ESF_REF,
-                    "amount_impact": "0.01",
-                    "summary": (
-                        "НДС в 1С 84,00 ₸, в ЭСФ 84,01 ₸ — построчное округление "
-                        "против округления от итога"
+                    "id": "b7c8d9e0f1a2b3c4",
+                    "code": "D06",
+                    "severity": "high",
+                    "status": "open",
+                    "pattern": "R2",
+                    "counterparty": {"ref": CP_REF, "bin": "123456789012"},
+                    "receipt": {
+                        "ref": RECEIPT_R2_REF,
+                        "date": "2026-05-22",
+                        "number": "000208",
+                        "total": "120000.00",
+                        "vat": "16551.72",
+                    },
+                    "esf": {
+                        "ref": ESF_R2_REF,
+                        "date": "2026-05-23",
+                        "reg_number": "ESF-KZ-8934-2026",
+                        "status": "delivered",
+                        "total": "139200.00",
+                        "vat": "19200.00",
+                    },
+                    "diff": {"net": "-16551.72", "vat": "-2648.28", "total": "-19200.00"},
+                    "short": (
+                        "В поступлении цена 1 200,00 ₸ включает НДС, в ЭСФ — без НДС. "
+                        "Расхождение НДС 2 648,28 ₸ (паттерн R2)"
                     ),
                 },
                 {
-                    "id": "disc-0002",
+                    "id": "d1a2b3c4e5f6a7b8",
+                    "code": "D14",
+                    "severity": "info",
+                    "status": "open",
+                    "pattern": "R1",
+                    "counterparty": {"ref": CP_REF, "bin": "123456789012"},
+                    "receipt": {
+                        "ref": RECEIPT_REF,
+                        "date": "2026-05-14",
+                        "number": "000145",
+                        "total": "812.06",
+                        "vat": "112.00",
+                    },
+                    "esf": {
+                        "ref": ESF_REF,
+                        "date": "2026-05-15",
+                        "reg_number": "ESF-KZ-8891-2026",
+                        "status": "delivered",
+                        "total": "812.07",
+                        "vat": "112.01",
+                    },
+                    "diff": {"net": "0.00", "vat": "-0.01", "total": "-0.01"},
+                    "short": (
+                        "НДС в 1С 112,00 ₸, в ЭСФ 112,01 ₸ — построчное округление "
+                        "против округления от итога (паттерн R1)"
+                    ),
+                },
+                {
+                    "id": "c4d5e6f7a8b9c0d1",
                     "code": "D03",
-                    "severity": "высокая",
-                    "counterparty_name": COUNTERPARTY_2["name"],
+                    "severity": "high",
+                    "status": "open",
+                    "pattern": None,
+                    "counterparty": {"ref": CP2_REF, "bin": "880101300123"},
                     "receipt": None,
-                    "esf": ESF_NO_RECEIPT_REF,
-                    "amount_impact": "46080.00",
-                    "summary": "ЭСФ на 430 080,00 ₸ без поступления в базе",
+                    "esf": {
+                        "ref": ESF_ORPHAN_REF,
+                        "date": "2026-06-03",
+                        "reg_number": "ESF-KZ-9042-2026",
+                        "status": "delivered",
+                        "total": "445440.00",
+                        "vat": "61440.00",
+                    },
+                    "diff": {"net": "-384000.00", "vat": "-61440.00", "total": "-445440.00"},
+                    "short": "ЭСФ на 445 440,00 ₸ без поступления в базе",
                 },
             ],
-            "page": params.get("page", 1),
-            "page_size": params.get("page_size", 50),
-            "total": 2,
+            "page": args.get("page", 1),
+            "page_size": args.get("page_size", 50),
+            "total": 3,
             "has_more": False,
         }
 
-    def _ПолучитьРасхождение(self, params: dict[str, Any]) -> dict[str, Any]:
-        if params["discrepancy_id"] == "disc-0002":
-            return {"card": self._card_d03()}
-        return {"card": self._card_d14()}
+    def _get_discrepancy(self, args: dict[str, Any]) -> dict[str, Any]:
+        card_id = args.get("id")
+        if card_id == "b7c8d9e0f1a2b3c4":
+            return self._card_r2()
+        if card_id == "c4d5e6f7a8b9c0d1":
+            return self._card_d03()
+        return self._card_r1()
 
-    def _card_d14(self) -> dict[str, Any]:
+    def _card_r1(self) -> dict[str, Any]:
         return {
-            "id": "disc-0001",
+            "id": "d1a2b3c4e5f6a7b8",
             "code": "D14",
-            "description": "Копеечное расхождение в допуске (см. R1–R6)",
-            "severity": "инфо",
-            "receipt": RECEIPT_REF,
-            "esf": ESF_REF,
-            "counterparty": COUNTERPARTY,
-            "field_comparisons": [
+            "severity": "info",
+            "status": "open",
+            "reviewed": None,
+            "pair": {
+                "receipt": {
+                    "ref": RECEIPT_REF,
+                    "date": "2026-05-14",
+                    "number": "000145",
+                    "posted": True,
+                    "vat_included_in_price": False,
+                    "currency": "KZT",
+                    "totals": {"net": "700.06", "vat": "112.00", "total": "812.06"},
+                },
+                "esf": {
+                    "ref": ESF_REF,
+                    "date_issue": "2026-05-15",
+                    "date_turnover": "2026-05-14",
+                    "reg_number": "ESF-KZ-8891-2026",
+                    "status": "delivered",
+                    "kind": "original",
+                    "replaces": None,
+                    "totals": {"net": "700.06", "vat": "112.01", "total": "812.07"},
+                },
+                "link": "explicit",
+            },
+            "header_diff": [
                 {
-                    "field": "Сумма без НДС",
-                    "receipt_value": "700.06",
-                    "esf_value": "700.06",
-                    "difference": None,
+                    "field": "net",
+                    "receipt": "700.06",
+                    "esf": "700.06",
+                    "diff": "0.00",
                     "within_tolerance": True,
                 },
                 {
-                    "field": "Сумма НДС",
-                    "receipt_value": "84.00",
-                    "esf_value": "84.01",
-                    "difference": "-0.01",
+                    "field": "vat",
+                    "receipt": "112.00",
+                    "esf": "112.01",
+                    "diff": "-0.01",
+                    "within_tolerance": True,
+                },
+                {
+                    "field": "date_turnover",
+                    "receipt": "2026-05-14",
+                    "esf": "2026-05-14",
+                    "diff": 0,
                     "within_tolerance": True,
                 },
             ],
-            "line_comparisons": [
+            "lines": [
                 {
+                    "match": "matched",
+                    "match_level": 2,
+                    "confidence": "high",
+                    "receipt_line": RECEIPT_LINES[0],
+                    "esf_line": ESF_LINES[0],
+                    "diff": None,
+                    "pattern": None,
+                },
+                {
+                    "match": "matched_within_tolerance",
+                    "match_level": 2,
+                    "confidence": "high",
                     "receipt_line": RECEIPT_LINES[2],
-                    "esf_lines": [ESF_LINES[2]],
-                    "status": "совпадает_в_допуске",
-                    "match_level": "2",
-                    "confidence": "высокая",
-                    "difference_net": "0",
-                    "difference_vat": "-0.01",
-                    "within_tolerance": True,
-                }
+                    "esf_line": ESF_LINES[2],
+                    "diff": {"vat": "-0.01", "total": "-0.01"},
+                    "pattern": "R1",
+                },
             ],
-            "rounding_code": "R1",
-            "probable_cause": (
-                "В поступлении НДС посчитан построчно и округлён в каждой строке "
-                "(12,00 + 24,00 + 48,00 = 84,00). В ЭСФ НДС рассчитан от итога: "
-                "700,06 × 12 % = 84,0072, округлено до 84,01."
-            ),
-            "recommended_action": "Допуск; при необходимости корректировка суммы НДС в строке",
-            "suggested_tool": "plan_adjust_lines",
-            "reviewed": False,
-            "reviewed_comment": None,
+            "diagnosis": {
+                "pattern": "R1",
+                "explanation": (
+                    "В поступлении НДС посчитан построчно и округлён в каждой строке "
+                    "(16,00 + 32,00 + 64,00 = 112,00). В ЭСФ НДС рассчитан от итога: "
+                    "700,06 × 16 % = 112,0096, округлено до 112,01. Разница 0,01 ₸ "
+                    "в пределах допуска."
+                ),
+                "confidence": "high",
+            },
+            "suggested_actions": [
+                {
+                    "action": "adjust_lines",
+                    "label": "Привести НДС строки 3 к значению ЭСФ",
+                    "risk": "low",
+                },
+                {"action": "mark_reviewed", "label": "Принять как есть", "risk": "none"},
+            ],
+        }
+
+    def _card_r2(self) -> dict[str, Any]:
+        return {
+            "id": "b7c8d9e0f1a2b3c4",
+            "code": "D06",
+            "severity": "high",
+            "status": "open",
+            "reviewed": None,
+            "pair": {
+                "receipt": {
+                    "ref": RECEIPT_R2_REF,
+                    "date": "2026-05-22",
+                    "number": "000208",
+                    "posted": True,
+                    "vat_included_in_price": True,
+                    "currency": "KZT",
+                    "totals": {"net": "103448.28", "vat": "16551.72", "total": "120000.00"},
+                },
+                "esf": {
+                    "ref": ESF_R2_REF,
+                    "date_issue": "2026-05-23",
+                    "date_turnover": "2026-05-22",
+                    "reg_number": "ESF-KZ-8934-2026",
+                    "status": "delivered",
+                    "kind": "original",
+                    "replaces": None,
+                    "totals": {"net": "120000.00", "vat": "19200.00", "total": "139200.00"},
+                },
+                "link": "explicit",
+            },
+            "header_diff": [
+                {
+                    "field": "net",
+                    "receipt": "103448.28",
+                    "esf": "120000.00",
+                    "diff": "-16551.72",
+                    "within_tolerance": False,
+                },
+                {
+                    "field": "vat",
+                    "receipt": "16551.72",
+                    "esf": "19200.00",
+                    "diff": "-2648.28",
+                    "within_tolerance": False,
+                },
+                {
+                    "field": "rate",
+                    "receipt": "16",
+                    "esf": "16",
+                    "diff": None,
+                    "within_tolerance": True,
+                },
+            ],
+            "lines": [
+                {
+                    "match": "matched_with_diff",
+                    "match_level": 2,
+                    "confidence": "high",
+                    "receipt_line": RECEIPT_R2_LINES[0],
+                    "esf_line": ESF_R2_LINES[0],
+                    "diff": {
+                        "qty": "0.000",
+                        "price": "0.00",
+                        "net": "-16551.72",
+                        "vat": "-2648.28",
+                        "total": "-19200.00",
+                    },
+                    "pattern": "R2",
+                },
+            ],
+            "diagnosis": {
+                "pattern": "R2",
+                "explanation": (
+                    "Цена 1 200,00 ₸ одна и та же, но в поступлении включён флаг "
+                    "«Сумма включает НДС», а поставщик выписал ЭСФ с НДС сверху. "
+                    "Из-за этого расходятся и сумма без НДС, и сумма НДС."
+                ),
+                "confidence": "high",
+            },
+            "suggested_actions": [
+                {
+                    "action": "set_vat_mode",
+                    "label": "Снять «Сумма включает НДС» и пересчитать",
+                    "risk": "low",
+                },
+                {
+                    "action": "adjust_lines",
+                    "label": "Привести суммы к значениям ЭСФ",
+                    "risk": "low",
+                },
+            ],
         }
 
     def _card_d03(self) -> dict[str, Any]:
         return {
-            "id": "disc-0002",
+            "id": "c4d5e6f7a8b9c0d1",
             "code": "D03",
-            "description": "ЭСФ без поступления",
-            "severity": "высокая",
-            "receipt": None,
-            "esf": ESF_NO_RECEIPT_REF,
-            "counterparty": COUNTERPARTY_2,
-            "field_comparisons": [],
-            "line_comparisons": [],
-            "rounding_code": None,
-            "probable_cause": (
-                "ЭСФ выписана 03.06.2026, дата оборота 01.06.2026, поступление в базе "
-                "не найдено ни по явной связи, ни по сумме и дате."
-            ),
-            "recommended_action": "Создать поступление по ЭСФ",
-            "suggested_tool": "plan_create_receipt_from_esf",
-            "reviewed": False,
-            "reviewed_comment": None,
+            "severity": "high",
+            "status": "open",
+            "reviewed": None,
+            "pair": {
+                "receipt": None,
+                "esf": {
+                    "ref": ESF_ORPHAN_REF,
+                    "date_issue": "2026-06-03",
+                    "date_turnover": "2026-06-01",
+                    "reg_number": "ESF-KZ-9042-2026",
+                    "status": "delivered",
+                    "kind": "original",
+                    "replaces": None,
+                    "totals": {"net": "384000.00", "vat": "61440.00", "total": "445440.00"},
+                },
+                "link": "none",
+            },
+            "header_diff": [],
+            "lines": [],
+            "diagnosis": {
+                "pattern": None,
+                "explanation": (
+                    "ЭСФ выписана 03.06.2026, дата оборота 01.06.2026. Поступление "
+                    "в базе не найдено ни по явной связи, ни по контрагенту, сумме и дате."
+                ),
+                "confidence": "high",
+            },
+            "suggested_actions": [
+                {
+                    "action": "create_receipt_from_esf",
+                    "label": "Создать поступление по ЭСФ",
+                    "risk": "medium",
+                },
+            ],
         }
 
-    def _ПолучитьДокумент(self, params: dict[str, Any]) -> dict[str, Any]:
-        if params["kind"] == "ЭСФПолученный":
+    def _get_document(self, args: dict[str, Any]) -> dict[str, Any]:
+        if str(args.get("uuid", "")).startswith("doc-esf"):
             return {
                 "receipt": None,
                 "esf": {
-                    "header": {
+                    "head": {
                         "ref": ESF_REF,
-                        "organization": ORG,
-                        "counterparty": COUNTERPARTY,
-                        "contract_name": "Договор поставки № 12 от 09.01.2026",
-                        "currency": "KZT",
-                        "exchange_rate": "1",
-                        "amount_net": "700.06",
-                        "amount_vat": "84.01",
-                        "amount_gross": "784.07",
-                        "vat_included_in_price": False,
-                        "is_posted": True,
+                        "date_issue": "2026-05-15",
+                        "date_turnover": "2026-05-14",
+                        "reg_number": "ESF-KZ-8891-2026",
+                        "status": "delivered",
+                        "kind": "original",
+                        "replaces": None,
+                        "totals": {"net": "700.06", "vat": "112.01", "total": "812.07"},
                     },
                     "lines": ESF_LINES,
-                    "status": "выписана",
-                    "turnover_date": "2026-05-14",
-                    "issue_date": "2026-05-15",
-                    "registration_number": "ESF-KZ-8891-2026",
-                    "linked_receipt": RECEIPT_REF,
-                    "corrects": None,
                 },
+                "links": [{"ref": RECEIPT_REF, "kind": "receipt"}],
             }
         return {
             "receipt": {
-                "header": {
+                "head": {
                     "ref": RECEIPT_REF,
-                    "organization": ORG,
-                    "counterparty": COUNTERPARTY,
-                    "contract_name": "Договор поставки № 12 от 09.01.2026",
-                    "currency": "KZT",
-                    "exchange_rate": "1",
-                    "amount_net": "700.06",
-                    "amount_vat": "84.00",
-                    "amount_gross": "784.06",
+                    "date": "2026-05-14",
+                    "number": "000145",
+                    "posted": True,
                     "vat_included_in_price": False,
-                    "is_posted": True,
+                    "currency": "KZT",
+                    "exchange_rate": None,
+                    "totals": {"net": "700.06", "vat": "112.00", "total": "812.06"},
                 },
                 "lines": RECEIPT_LINES,
-                "esf_number": "8891",
-                "esf_date": "2026-05-15",
-                "linked_esf": ESF_REF,
             },
             "esf": None,
+            "links": [{"ref": ESF_REF, "kind": "esf"}],
         }
 
-    def _ПолучитьОборотыНДС(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _find_esf_candidates(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
-            "rows": [
+            "items": [
                 {
-                    "vat_rate": "12",
-                    "amount_net": "14206083.00",
-                    "amount_vat": "1704729.96",
-                    "source": "учёт",
-                },
-                {
-                    "vat_rate": "12",
-                    "amount_net": "14206083.00",
-                    "amount_vat": "1704733.43",
-                    "source": "ЭСФ",
-                },
-            ],
-            "accounting_vat_total": "1704729.96",
-            "esf_vat_total": "1704733.43",
-            "difference": "-3.47",
-        }
-
-    def _ПолучитьКарточкуКонтрагента(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "counterparty": COUNTERPARTY,
-            "is_vat_payer_on_date": True,
-            "vat_certificate_series": "60001",
-            "vat_certificate_number": "0012345",
-            "vat_registered_from": "2019-03-12",
-            "vat_deregistered_from": None,
-        }
-
-    def _НайтиКандидатовЭСФ(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "candidates": [
-                {
-                    "ref": ESF_REF,
-                    "score": "0.94",
-                    "confidence": "высокая",
-                    "matched_on": ["БИН", "сумма с НДС", "дата оборота"],
-                    "amount_difference": "0.01",
-                    "days_difference": 1,
+                    "esf": {
+                        "ref": ESF_REF,
+                        "date": "2026-05-15",
+                        "reg_number": "ESF-KZ-8891-2026",
+                        "status": "delivered",
+                        "total": "812.07",
+                        "vat": "112.01",
+                    },
+                    "score": 0.94,
+                    "reasons": ["same_bin", "total_equal", "date_diff_1", "lines_similar_0.87"],
+                    "already_linked_to": None,
                 }
             ]
         }
 
-    def _НайтиКандидатовПоступления(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"candidates": []}
+    def _find_receipt_candidates(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"items": []}
 
-    def _ПолучитьИсториюИзменений(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"versioning_enabled": False, "versions": []}
-
-    def _ПолучитьНастройки(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _get_counterparty(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
-            "settings": {
-                "tolerances": {
-                    "line_per_unit": "0.01",
-                    "line_cap": "1.00",
-                    "document_per_line": "0.01",
-                    "document_cap": "5.00",
-                    "period_material": "1.00",
-                },
-                "masking_enabled": True,
-                "period_tail_days": 20,
-                "include_extra_costs": False,
-                "include_expense_reports": False,
-            }
+            "ref": CP_REF,
+            "bin": "123456789012",
+            "name": "ТОО «Снабженец»",
+            "vat_payer": True,
+            "vat_certificate": {
+                "series": "60001",
+                "number": "0012345",
+                "date_from": "2019-03-12",
+                "date_to": None,
+            },
+            "vat_status_on_date": "payer",
+            "main_contract": {
+                "type": "Справочник.ДоговорыКонтрагентов",
+                "uuid": "contract-0001",
+                "presentation": "Договор поставки № 12 от 09.01.2026",
+                "nav": "e1cib/data/Справочник.ДоговорыКонтрагентов?ref=contract-0001",
+            },
+            "contracts_count": 2,
+            "receipts_in_period": 14,
+            "esf_in_period": 13,
+            "item_mapping_count": 37,
         }
 
-    def _ОткрытьОбъект(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _get_vat_turnover(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
-            "navigation_link": f"e1cib/data/Документ.{params['kind']}?ref={params['uuid']}",
-            "presentation": params["uuid"],
+            "by_rate": [
+                {"rate": "16", "net": "32761732.00", "vat": "5241877.12", "account": "1420"},
+                {"rate": "0", "net": "1840000.00", "vat": "0.00", "account": None},
+                {"rate": "exempt", "net": "412000.00", "vat": "0.00", "account": None},
+            ],
+            "register_vat_offset": "5241877.12",
+            "ledger_1420_debit": "5241877.12",
+            "esf_sum_delivered": "5241880.59",
+            "diff_ledger_vs_esf": "-3.47",
         }
+
+    def _get_journal(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "plan_id": "plan-lines-0001",
+                    "session_id": "session-0001",
+                    "action": "adjust_lines",
+                    "applied_at": "2026-07-01T10:12:00",
+                    "user": "Бухгалтер Иванова",
+                    "objects": [RECEIPT_REF],
+                    "rollback_ref": None,
+                }
+            ],
+            "page": args.get("page", 1),
+            "page_size": args.get("page_size", 50),
+            "total": 1,
+            "has_more": False,
+        }
+
+    def _get_settings(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"settings": self._settings()}
+
+    def _open_object(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {"nav": f"e1cib/data/Документ?ref={args['uuid']}"}
 
     # -- запись, фаза 1 -----------------------------------------------------
 
-    def _УстановитьСвязь_План(self, params: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _plan_base(plan_id: str, action: str) -> dict[str, Any]:
         return {
-            "plan_id": "plan-link-0001",
-            "tool": "plan_set_link",
-            "discrepancy_id": params.get("discrepancy_id"),
-            "title": "Установить связь поступления № 145 с ЭСФ № 8891",
-            "changes": [
-                {
-                    "target": ESF_REF,
-                    "path": "ДокументОснование",
-                    "old_value": None,
-                    "new_value": RECEIPT_REF["presentation"],
-                    "comment": None,
-                }
-            ],
-            "affected_postings": [],
-            "blocked": False,
+            "plan_id": plan_id,
+            "action": action,
+            "expires_at": "2026-07-01T10:00:00",
+            "checks": [{"check": "period_open", "ok": True, "message": None}],
+            "can_apply": True,
             "block_reason": None,
-            "requires_reposting": False,
         }
 
-    def _СкорректироватьСтроки_План(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "plan_id": "plan-lines-0001",
-            "tool": "plan_adjust_lines",
-            "discrepancy_id": params.get("discrepancy_id"),
-            "title": "Привести НДС строки 3 к значению из ЭСФ",
-            "changes": [
-                {
-                    "target": RECEIPT_REF,
-                    "path": "Товары[3].СуммаНДС",
-                    "old_value": "48.00",
-                    "new_value": "48.01",
-                    "comment": "ЭСФ принята за эталон (паттерн R1)",
-                },
-                {
-                    "target": RECEIPT_REF,
-                    "path": "СуммаДокумента",
-                    "old_value": "784.06",
-                    "new_value": "784.07",
-                    "comment": None,
-                },
-            ],
-            "affected_postings": ["Дт 1420 Кт 3310 — 0,01 ₸"],
-            "blocked": False,
-            "block_reason": None,
-            "requires_reposting": True,
-        }
+    def _plan_set_link(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = self._plan_base("plan-link-0001", "set_link")
+        plan["checks"] += [
+            {"check": "esf_not_linked_elsewhere", "ok": True, "message": None},
+            {"check": "same_counterparty", "ok": True, "message": None},
+        ]
+        plan["changes"] = [
+            {
+                "object": ESF_REF,
+                "line": None,
+                "field": "ДокументОснование",
+                "from": None,
+                "to": RECEIPT_REF["presentation"],
+            }
+        ]
+        return plan
 
-    def _ИзменитьПризнакНДС_План(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "plan_id": "plan-vat-0001",
-            "tool": "plan_change_vat_flag",
-            "discrepancy_id": params.get("discrepancy_id"),
-            "title": "Снять флаг «Сумма включает НДС»",
-            "changes": [
-                {
-                    "target": RECEIPT_REF,
-                    "path": "СуммаВключаетНДС",
-                    "old_value": "Да",
-                    "new_value": "Нет",
-                    "comment": "Пересчёт сумм по всем строкам",
-                }
-            ],
-            "affected_postings": ["Дт 1420 Кт 3310"],
-            "blocked": False,
-            "block_reason": None,
-            "requires_reposting": True,
-        }
+    def _plan_adjust_lines(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = self._plan_base("plan-lines-0001", "adjust_lines")
+        plan["document"] = RECEIPT_REF
+        plan["changes"] = [
+            {"object": None, "line": 3, "field": "СуммаНДС", "from": "64.00", "to": "64.01"},
+        ]
+        plan["totals_after"] = {"net": "700.06", "vat": "112.01", "total": "812.07"}
+        plan["postings_affected"] = [
+            {"account_dt": "1420", "account_kt": "3310", "from": "112.00", "to": "112.01"}
+        ]
+        plan["will_repost"] = True
+        return plan
 
-    def _СоздатьКорректировку_План(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "plan_id": "plan-adj-0001",
-            "tool": "plan_create_adjustment",
-            "discrepancy_id": params.get("discrepancy_id"),
-            "title": "Создать корректировку поступления № 145",
-            "changes": [],
-            "affected_postings": [],
-            "blocked": True,
-            "block_reason": (
-                "Период закрыт по 31.03.2026; документ от 14.05.2026 в открытом "
-                "периоде — корректировка не требуется"
-            ),
-            "requires_reposting": False,
-        }
-
-    def _ПометитьПроверено(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"discrepancy_id": params["discrepancy_id"], "reviewed": True}
-
-    def _СоздатьПоступлениеПоЭСФ_План(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "plan_id": "plan-receipt-0001",
-            "draft": {
-                "esf": ESF_NO_RECEIPT_REF,
-                "counterparty": COUNTERPARTY_2,
-                "contract_name": "Основной договор",
-                "contract_confidence": "средняя",
-                "warehouse": "Основной склад",
-                "date": "2026-06-01",
-                "lines": [
-                    {
-                        "esf_line_number": 1,
-                        "item": {
-                            "item_uuid": "item-2001",
-                            "item_name": "Кабель ВВГнг 3х2.5",
-                            "confidence": "высокая",
-                            "source": "история сопоставлений",
-                            "alternatives": [],
-                        },
-                        "uom": "м",
-                        "quantity": "1200",
-                        "price": "320.00",
-                        "amount_net": "384000.00",
-                        "vat_rate": "12",
-                        "amount_vat": "46080.00",
-                        "account": "1330",
-                        "account_confidence": "высокая",
-                    },
-                    {
-                        "esf_line_number": 2,
-                        "item": {
-                            "item_uuid": None,
-                            "item_name": "Муфта соединительная СТп-1",
-                            "confidence": "низкая",
-                            "source": "не найдено — создать новую",
-                            "alternatives": ["Муфта соединительная", "Муфта СТп"],
-                        },
-                        "uom": "шт",
-                        "quantity": "40",
-                        "price": "0.00",
-                        "amount_net": "0.00",
-                        "vat_rate": "12",
-                        "amount_vat": "0.00",
-                        "account": None,
-                        "account_confidence": None,
-                    },
-                ],
-                "uncertain_lines": 1,
-                "amount_net": "384000.00",
-                "amount_vat": "46080.00",
-                "amount_gross": "430080.00",
+    def _plan_set_vat_mode(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = self._plan_base("plan-vat-0001", "set_vat_mode")
+        plan["document"] = RECEIPT_R2_REF
+        plan["changes"] = [
+            {
+                "object": None,
+                "line": None,
+                "field": "СуммаВключаетНДС",
+                "from": "Да",
+                "to": "Нет",
             },
-            "blocked": False,
-            "block_reason": None,
+            {"object": None, "line": 1, "field": "Сумма", "from": "103448.28", "to": "120000.00"},
+            {"object": None, "line": 1, "field": "СуммаНДС", "from": "16551.72", "to": "19200.00"},
+        ]
+        plan["totals_after"] = {"net": "120000.00", "vat": "19200.00", "total": "139200.00"}
+        plan["postings_affected"] = [
+            {"account_dt": "1330", "account_kt": "3310", "from": "103448.28", "to": "120000.00"},
+            {"account_dt": "1420", "account_kt": "3310", "from": "16551.72", "to": "19200.00"},
+        ]
+        plan["will_repost"] = True
+        return plan
+
+    def _plan_create_correction(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = self._plan_base("plan-corr-0001", "create_correction")
+        plan["can_apply"] = False
+        plan["block_reason"] = (
+            "Период закрыт по 31.03.2026, документ от 22.05.2026 в открытом периоде — "
+            "корректировка не требуется, правьте исходный документ"
+        )
+        plan["checks"] = [
+            {"check": "period_open", "ok": True, "message": "Документ в открытом периоде"}
+        ]
+        plan["basis"] = RECEIPT_R2_REF
+        plan["lines"] = []
+        plan["totals_after"] = {"net": "120000.00", "vat": "19200.00", "total": "139200.00"}
+        plan["will_post"] = False
+        return plan
+
+    def _plan_create_receipt_from_esf(self, args: dict[str, Any]) -> dict[str, Any]:
+        overrides = {o["esf_line"]: o["item"] for o in args.get("overrides", [])}
+        second_resolved = 2 in overrides
+
+        plan = self._plan_base("plan-receipt-0001", "create_receipt_from_esf")
+        plan["checks"] = [
+            {"check": "period_open", "ok": True, "message": None},
+            {"check": "esf_not_linked", "ok": True, "message": None},
+        ]
+        plan["can_apply"] = second_resolved
+        plan["block_reason"] = (
+            None if second_resolved else "1 строка требует выбора номенклатуры"
+        )
+        plan["draft"] = {
+            "organization": ORG_REF,
+            "counterparty": {"ref": CP2_REF, "confidence": "high", "alternatives": []},
+            "contract": {
+                "ref": {
+                    "type": "Справочник.ДоговорыКонтрагентов",
+                    "uuid": "contract-0002",
+                    "presentation": "Основной договор",
+                    "nav": None,
+                },
+                "confidence": "medium",
+                "alternatives": [],
+            },
+            "warehouse": {
+                "ref": {
+                    "type": "Справочник.Склады",
+                    "uuid": "wh-0001",
+                    "presentation": "Основной склад",
+                    "nav": None,
+                },
+                "confidence": "medium",
+                "alternatives": [],
+            },
+            "date": "2026-06-01",
+            "vat_included": False,
+            "lines": [
+                {
+                    "n": 1,
+                    "esf_name": "Кабель ВВГнг 3х2.5",
+                    "item": {
+                        "ref": {
+                            "type": "Справочник.Номенклатура",
+                            "uuid": "item-2001",
+                            "presentation": "Кабель ВВГнг 3х2.5",
+                            "nav": None,
+                        },
+                        "confidence": "high",
+                        "source": "history",
+                        "alternatives": [],
+                    },
+                    "suggest_new_item": None,
+                    "unit": "м",
+                    "qty": "1200.000",
+                    "price": "320.00",
+                    "vat_rate": VAT_RATE,
+                    "account": {"code": "1330", "confidence": "high"},
+                    "needs_attention": False,
+                },
+                {
+                    "n": 2,
+                    "esf_name": "Муфта соединительная СТп-1",
+                    "item": {
+                        "ref": (
+                            {
+                                "type": "Справочник.Номенклатура",
+                                "uuid": overrides.get(2, ""),
+                                "presentation": "Муфта соединительная СТп-1",
+                                "nav": None,
+                            }
+                            if second_resolved
+                            else None
+                        ),
+                        "confidence": "high" if second_resolved else "none",
+                        "source": "mapping" if second_resolved else "none",
+                        "alternatives": [],
+                    },
+                    "suggest_new_item": (
+                        None
+                        if second_resolved
+                        else {
+                            "name": "Муфта соединительная СТп-1",
+                            "unit": "шт",
+                            "vat_rate": VAT_RATE,
+                        }
+                    ),
+                    "unit": "шт",
+                    "qty": "40.000",
+                    "price": "0.00",
+                    "vat_rate": VAT_RATE,
+                    "account": {"code": "1330", "confidence": "medium"}
+                    if second_resolved
+                    else None,
+                    "needs_attention": not second_resolved,
+                },
+            ],
+            "totals": {"net": "384000.00", "vat": "61440.00", "total": "445440.00"},
+            "attention_count": 0 if second_resolved else 1,
+        }
+        return plan
+
+    def _plan_create_receipts_bulk(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "esf": ESF_ORPHAN_REF,
+                    "plan_id": "plan-receipt-0001",
+                    "attention_count": 1,
+                    "can_apply": False,
+                    "block_reason": "1 строка требует выбора номенклатуры",
+                }
+            ],
+            "total_attention": 1,
         }
 
-    def _СоздатьПоступленияМассово_План(self, params: dict[str, Any]) -> dict[str, Any]:
-        single = self._СоздатьПоступлениеПоЭСФ_План({"esf_uuid": params["esf_uuids"][0]})
+    def _mark_reviewed(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
-            "plan_id": "plan-bulk-0001",
-            "drafts": [single["draft"]],
-            "total_uncertain_lines": 1,
-            "blocked": False,
-            "block_reason": None,
+            "discrepancy_id": args["discrepancy_id"],
+            "status": args.get("status", "reviewed"),
         }

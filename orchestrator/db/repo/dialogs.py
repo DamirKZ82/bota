@@ -1,12 +1,8 @@
-"""Диалоги: рабочая история для модели и словарь псевдонимов.
+"""Диалоги: рабочая история модели.
 
-В таблицах лежит только то, что видела модель, — в псевдонимах. Отображаемую
-пользователю переписку ведёт форма «Агент» в 1С (ТЗ п.7), поэтому реальные
-наименования сюда не попадают.
-
-Исключение одно: `dialog_aliases`, где расшифровка псевдонимов хранится
-зашифрованной. Без неё после перезапуска оркестратора нельзя вернуть в ответ
-реальные наименования и диалог пришлось бы начинать заново.
+В таблицах лежит только то, что видела модель, — в псевдонимах. Маскирование и
+обратную подстановку делает расширение 1С (A.0.5), отображаемую пользователю
+переписку ведёт форма «Агент» там же. Реальных наименований здесь нет вовсе.
 """
 
 from __future__ import annotations
@@ -14,11 +10,9 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from orchestrator.db.crypto import Cipher
 from orchestrator.db.pool import execute_db, fetch_one, query_db
 from orchestrator.llm.base import Turn
 from orchestrator.llm.serde import turn_from_json, turn_to_json
-from orchestrator.masking.masker import MaskingSession
 
 
 async def create(
@@ -115,55 +109,8 @@ async def count_turns(*, tenant_id: str, dialog_id: str) -> int:
 
 
 async def close(*, tenant_id: str, dialog_id: str) -> None:
-    """Закрыть диалог. Словарь псевдонимов стирается сразу, не дожидаясь ретеншна."""
-    await execute_db(
-        "DELETE FROM dialog_aliases WHERE tenant_id = $1 AND dialog_id = $2",
-        tenant_id,
-        dialog_id,
-    )
     await execute_db(
         "UPDATE dialogs SET closed_at = now() WHERE tenant_id = $1 AND id = $2",
         tenant_id,
         dialog_id,
     )
-
-
-# -- словарь псевдонимов ----------------------------------------------------
-
-
-async def load_masking(
-    *, tenant_id: str, dialog_id: str, cipher: Cipher, enabled: bool
-) -> MaskingSession:
-    rows = await query_db(
-        """
-        SELECT alias, value_enc
-          FROM dialog_aliases
-         WHERE tenant_id = $1
-           AND dialog_id = $2
-        """,
-        tenant_id,
-        dialog_id,
-    )
-    session = MaskingSession(enabled=enabled)
-    session.restore(
-        {row["alias"]: cipher.decrypt(bytes(row["value_enc"])) for row in rows}
-    )
-    return session
-
-
-async def save_masking(
-    *, tenant_id: str, dialog_id: str, cipher: Cipher, session: MaskingSession
-) -> None:
-    """Сохранить новые псевдонимы. Существующие не переписываются: они неизменны."""
-    for alias, value in session.snapshot().items():
-        await execute_db(
-            """
-            INSERT INTO dialog_aliases (dialog_id, tenant_id, alias, value_enc)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (dialog_id, alias) DO NOTHING
-            """,
-            dialog_id,
-            tenant_id,
-            alias,
-            cipher.encrypt(value),
-        )

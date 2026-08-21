@@ -1,18 +1,38 @@
-"""Базовые типы, общие для всех контрактов инструментов.
+"""Базовые типы Приложения А (раздел A.0.3).
 
-Денежные суммы — только `Decimal`. Весь смысл продукта в копеечных расхождениях
-(ТЗ п.4.4), поэтому float здесь недопустим: он сам является источником ошибки,
-которую агент должен искать. В JSON Decimal сериализуется строкой.
+Числа передаются **строками**: `"1234.56"`, а не `1234.56`. Это требование
+Приложения и оно обосновано — весь смысл продукта в копейках, а float по дороге
+через JSON способен сам создать ту ошибку, которую агент должен искать.
+
+Внутри оркестратора эти строки остаются строками: он ничего не считает
+(ТЗ п.3.1), арифметика живёт в движке сверки 1С. Помощник `to_decimal`
+существует только для метрик и тестов.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestrator.tools.enums import DocumentKind, EsfStatus
+DECIMAL_STRING = r"^-?\d+(\.\d+)?$"
+
+Money = Annotated[str, Field(pattern=DECIMAL_STRING, description="Сумма, 2 знака, строкой")]
+Qty = Annotated[str, Field(pattern=DECIMAL_STRING, description="Количество, до 3 знаков, строкой")]
+Rate = Annotated[str, Field(description="Ставка НДС: «16», «0» или «exempt»")]
+Bin = Annotated[str, Field(pattern=r"^\d{12}$", description="БИН/ИИН, 12 цифр")]
+
+
+def to_decimal(value: str | None) -> Decimal:
+    """Строка суммы → Decimal. Только для метрик и тестов, не для расчётов."""
+    if value is None:
+        return Decimal("0")
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        return Decimal("0")
 
 
 class Contract(BaseModel):
@@ -22,151 +42,130 @@ class Contract(BaseModel):
     что агент увидит неполные данные и назовёт неверную цифру.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # populate_by_name — потому что часть имён из Приложения А («from», «to»)
+    # совпадает с ключевыми словами Python и объявлена через alias.
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
 
-Money = Decimal
-"""Сумма в валюте учёта. Точность — 2 знака, кроме цены (см. `Line.price`)."""
+class Ref(Contract):
+    """Ссылка на объект 1С (A.0.3). Единый формат везде, где нужен переход в базу."""
+
+    type: str = Field(description="Тип объекта: «Документ.ПоступлениеТМЗИУслуг»")
+    uuid: str = Field(description="GUID ссылки")
+    presentation: str = Field(
+        description="Представление для показа. При маскировании — псевдоним",
+    )
+    nav: str | None = Field(
+        default=None,
+        description="Навигационная ссылка e1cib/… Не маскируется, в модель не уходит",
+    )
 
 
-class DocumentRef(Contract):
-    """Ссылка на объект 1С. Возвращается всеми инструментами вместо «голого» GUID."""
+class Page(Contract):
+    """Постраничная выдача (A.0.3)."""
 
-    kind: DocumentKind
-    uuid: str = Field(description="GUID ссылки объекта в базе 1С")
-    number: str = Field(description="Номер документа")
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+    total: int
+    has_more: bool
+
+
+class Settings(Contract):
+    """Настройки сверки (A.1). Значения по умолчанию — допуски из ТЗ п.4.4."""
+
+    line_tolerance_per_unit: Money = Field(default="0.01")
+    line_tolerance_max: Money = Field(default="1.00")
+    doc_tolerance_per_line: Money = Field(default="0.01")
+    doc_tolerance_max: Money = Field(default="5.00")
+    period_tolerance_total: Money = Field(default="1.00")
+    esf_tail_days: int = Field(
+        default=20,
+        description="«Хвост» периода для отбора ЭСФ — срок выписки (ТЗ п.4.1)",
+    )
+    candidate_days: int = Field(
+        default=10,
+        description="Допуск по дате при поиске кандидатов на связь",
+    )
+
+
+class Permissions(Contract):
+    """Права текущего пользователя 1С (A.1).
+
+    Определяют, какие действия агент вправе предлагать: без `create` нет смысла
+    готовить черновики поступлений.
+    """
+
+    read: bool
+    apply: bool
+    create: bool
+
+
+class Totals(Contract):
+    """Итоги документа: без НДС, НДС, с НДС."""
+
+    net: Money
+    vat: Money
+    total: Money
+
+
+class DocumentLine(Contract):
+    """Строка табличной части — одинаковая форма для поступления и ЭСФ (A.4)."""
+
+    n: int = Field(description="Номер строки, с 1")
+    item: Ref | None = Field(default=None, description="Номенклатура; в ЭСФ может отсутствовать")
+    name: str = Field(description="Наименование как в документе")
+    unit: str | None = None
+    qty: Qty
+    price: Money = Field(description="Цена за единицу; больше 2 знаков — источник R3")
+    net: Money
+    vat_rate: Rate
+    vat: Money
+    total: Money
+
+
+class ReceiptHead(Contract):
+    """Шапка поступления (A.4)."""
+
+    ref: Ref
     date: dt.date
-    presentation: str = Field(description="Представление для показа пользователю")
-    navigation_link: str | None = Field(
-        default=None,
-        description="Навигационная ссылка e1cib/... для клика в ответе агента (ТЗ п.5.3)",
-    )
-
-
-class Organization(Contract):
-    """Организация базы (ТЗ п.5.1, ПолучитьКонтекст)."""
-
-    uuid: str
-    name: str
-    bin: str = Field(description="БИН организации", min_length=12, max_length=12)
-    is_vat_payer: bool
-    accounting_currency: str = Field(default="KZT", description="Код валюты учёта, ISO 4217")
-
-
-class CounterpartyBrief(Contract):
-    """Контрагент в составе документа."""
-
-    uuid: str
-    name: str
-    bin: str | None = Field(default=None, description="БИН/ИИН; None для нерезидентов")
-
-
-class Period(Contract):
-    """Период сверки. Границы включаются обе."""
-
-    date_from: dt.date
-    date_to: dt.date
-
-    def __str__(self) -> str:
-        return f"{self.date_from:%d.%m.%Y}–{self.date_to:%d.%m.%Y}"
-
-
-class Tolerances(Contract):
-    """Допуски округления (ТЗ п.4.4). Значения по умолчанию — из ТЗ.
-
-    Допуск на строку и на документ считается по формуле «база × множитель,
-    но не более потолка»: например на документ 0,01 × число строк, максимум 5,00 ₸.
-    """
-
-    line_per_unit: Money = Field(
-        default=Decimal("0.01"),
-        description="Допуск на единицу количества в строке",
-    )
-    line_cap: Money = Field(default=Decimal("1.00"), description="Потолок допуска на строку")
-    document_per_line: Money = Field(
-        default=Decimal("0.01"),
-        description="Допуск на одну строку документа",
-    )
-    document_cap: Money = Field(default=Decimal("5.00"), description="Потолок допуска на документ")
-    period_material: Money = Field(
-        default=Decimal("1.00"),
-        description="Порог существенности для итогов периода",
-    )
-
-
-class Line(Contract):
-    """Строка табличной части поступления или ЭСФ.
-
-    Одинаковая форма для обеих сторон — движок сверки сравнивает однотипные объекты.
-    """
-
-    number: int = Field(description="Номер строки в документе, с 1")
-    item_name: str = Field(description="Наименование номенклатуры как в документе")
-    item_uuid: str | None = Field(
-        default=None,
-        description="GUID номенклатуры; None для строк ЭСФ, где номенклатура не сопоставлена",
-    )
-    uom: str | None = Field(default=None, description="Единица измерения")
-    quantity: Decimal
-    price: Decimal = Field(
-        description="Цена за единицу. Может иметь больше 2 знаков — источник расхождений R3",
-    )
-    amount_net: Money = Field(description="Сумма без НДС")
-    vat_rate: Decimal = Field(description="Ставка НДС в процентах, например 12")
-    amount_vat: Money
-    amount_gross: Money = Field(description="Сумма с НДС")
-
-
-class DocumentHeader(Contract):
-    """Шапка документа, общая часть поступления и ЭСФ."""
-
-    ref: DocumentRef
-    organization: Organization
-    counterparty: CounterpartyBrief
-    contract_name: str | None = Field(default=None, description="Договор контрагента")
-    currency: str = Field(default="KZT")
-    exchange_rate: Decimal = Field(default=Decimal("1"))
-    amount_net: Money
-    amount_vat: Money
-    amount_gross: Money
+    number: str
+    posted: bool = Field(description="Непроведённый документ даёт код D16")
     vat_included_in_price: bool = Field(
         description="Флаг «Сумма включает НДС». Расхождение флага — паттерн R2",
     )
-    is_posted: bool = Field(description="Проведён ли документ; непроведённые дают D16")
+    currency: str = Field(default="KZT")
+    exchange_rate: str | None = Field(default=None, description="Курс, если валюта не KZT")
+    totals: Totals
+
+
+class EsfHead(Contract):
+    """Шапка ЭСФ (A.4)."""
+
+    ref: Ref
+    date_issue: dt.date = Field(description="Дата выписки в ИС ЭСФ")
+    date_turnover: dt.date = Field(
+        description="Дата совершения оборота — определяет период НДС (источник D08)",
+    )
+    reg_number: str
+    status: str
+    kind: str = Field(description="original | fixed | additional")
+    replaces: Ref | None = Field(
+        default=None,
+        description="Для исправленной или дополнительной ЭСФ — исправляемая",
+    )
+    totals: Totals
 
 
 class ReceiptDocument(Contract):
-    """Поступление ТМЗ и услуг (или доп. расходов / авансовый отчёт)."""
-
-    header: DocumentHeader
-    lines: list[Line]
-    esf_number: str | None = Field(
-        default=None,
-        description="Номер ЭСФ из реквизитов поступления, если заполнен (ТЗ п.4.2)",
-    )
-    esf_date: dt.date | None = None
-    linked_esf: DocumentRef | None = Field(
-        default=None,
-        description="Явная связь с ЭСФ (документ-основание)",
-    )
+    head: ReceiptHead
+    lines: list[DocumentLine]
 
 
 class EsfDocument(Contract):
-    """Электронный счёт-фактура (полученный)."""
+    head: EsfHead
+    lines: list[DocumentLine]
 
-    header: DocumentHeader
-    lines: list[Line]
-    status: EsfStatus
-    turnover_date: dt.date = Field(
-        description="Дата совершения оборота — определяет период НДС (источник D08)",
-    )
-    issue_date: dt.date = Field(description="Дата выписки в ИС ЭСФ")
-    registration_number: str = Field(description="Регистрационный номер ЭСФ в ИС ЭСФ")
-    linked_receipt: DocumentRef | None = Field(
-        default=None,
-        description="Явная связь с поступлением (документ-основание)",
-    )
-    corrects: DocumentRef | None = Field(
-        default=None,
-        description="Для исправленной/дополнительной ЭСФ — исправляемая ЭСФ",
-    )
+
+class CounterpartyBrief(Contract):
+    ref: Ref
+    bin: Bin | None = Field(default=None, description="None для нерезидентов")

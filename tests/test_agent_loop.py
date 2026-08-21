@@ -13,9 +13,11 @@ from orchestrator.llm.base import (
     ToolUseBlock,
     Turn,
 )
-from orchestrator.masking.masker import MaskingSession
+from orchestrator.tools.envelope import CallContext
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.transport.mock import MockTransport
+
+CONTEXT = CallContext(user_id="user-1", session_id="session-1", masking=False)
 
 
 class ScriptedProvider(LLMProvider):
@@ -64,12 +66,11 @@ async def test_цикл_вызывает_инструмент_и_возвращ�
     result, turns = await _loop(provider).run(
         tenant_id="demo",
         user_message="Что за база?",
-        masking=MaskingSession(enabled=False),
+        context=CONTEXT,
     )
 
     assert result.text.startswith("Организация одна")
     assert [c.tool for c in result.calls] == ["get_context"]
-    assert result.calls[0].onec_method == "ПолучитьКонтекст"
     assert not result.truncated
     # История пригодна для продолжения диалога.
     assert len(turns) == 4
@@ -96,7 +97,7 @@ async def test_лимит_вызовов_даёт_промежуточный_о�
     result, _ = await _loop(provider, max_tool_calls=1).run(
         tenant_id="demo",
         user_message="Сверь всё",
-        masking=MaskingSession(enabled=False),
+        context=CONTEXT,
     )
 
     assert result.truncated
@@ -111,6 +112,7 @@ async def test_режим_только_чтение_прячет_планы_из
     await _loop(provider).run(
         tenant_id="demo",
         user_message="Покажи расхождения",
+        context=CONTEXT,
         allow_write_plans=False,
     )
     names = {t.name for t in provider.last_tools}
@@ -118,37 +120,33 @@ async def test_режим_только_чтение_прячет_планы_из
     assert "get_discrepancy" in names
 
 
-async def test_ответ_демаскируется_перед_выдачей_пользователю() -> None:
+async def test_псевдонимы_из_1с_остаются_в_ответе_нетронутыми() -> None:
+    """Маскирует и раскрывает псевдонимы 1С (A.0.5); оркестратор их не трогает."""
     provider = ScriptedProvider(
         [
             AssistantTurn(
                 blocks=[
-                    ToolUseBlock(
-                        id="tu_1", name="get_counterparty", input={"bin": "123456789012"}
-                    )
+                    TextBlock(text="По Контрагент-A1 расхождение 0,01 ₸ по НДС.")
                 ],
-                stop_reason="tool_use",
-            ),
-            AssistantTurn(
-                blocks=[TextBlock(text="Контрагент КОНТРАГЕНТ_1 — плательщик НДС.")],
                 stop_reason="end_turn",
-            ),
+            )
         ]
     )
     result, _ = await _loop(provider).run(
         tenant_id="demo",
-        user_message="Проверь контрагента",
-        masking=MaskingSession(enabled=True),
+        user_message="Что с контрагентом?",
+        context=CallContext(user_id="u", session_id="s", masking=True),
     )
-    assert "ТОО «Снабженец»" in result.text
-    assert "КОНТРАГЕНТ_1" not in result.text
+    assert result.text == "По Контрагент-A1 расхождение 0,01 ₸ по НДС."
 
 
 async def test_ошибка_инструмента_не_роняет_диалог() -> None:
     provider = ScriptedProvider(
         [
             AssistantTurn(
-                blocks=[ToolUseBlock(id="tu_1", name="get_counterparty", input={"bin": "нет"})],
+                blocks=[
+                    ToolUseBlock(id="tu_1", name="get_counterparty", input={"bin": "нет"})
+                ],
                 stop_reason="tool_use",
             ),
             AssistantTurn(
@@ -160,7 +158,7 @@ async def test_ошибка_инструмента_не_роняет_диало�
     result, _ = await _loop(provider).run(
         tenant_id="demo",
         user_message="Проверь контрагента",
-        masking=MaskingSession(enabled=False),
+        context=CONTEXT,
     )
     assert result.calls[0].ok is False
     assert "уточните БИН" in result.text

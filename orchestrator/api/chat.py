@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from orchestrator.api.deps import AgentDep, SettingsDep, StoreDep, TenantDep
 from orchestrator.db.repo import journal
+from orchestrator.tools.envelope import CallContext
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 log = structlog.get_logger(__name__)
@@ -19,9 +20,9 @@ class AskRequest(BaseModel):
         default=None,
         description="ID диалога; не указан — начинается новый",
     )
-    user_key: str = Field(
+    user_id: str = Field(
         default="unknown",
-        description="Идентификатор пользователя 1С — попадает в журнал",
+        description="UUID пользователя 1С — уходит в контекст вызова и в журнал",
     )
     allow_write_plans: bool = Field(
         default=True,
@@ -31,9 +32,9 @@ class AskRequest(BaseModel):
 
 class ToolCallView(BaseModel):
     tool: str
-    onec_method: str
     ok: bool
     duration_ms: int
+    error_code: str | None = None
 
 
 class AskResponse(BaseModel):
@@ -53,20 +54,25 @@ async def ask(
     settings: SettingsDep,
 ) -> AskResponse:
     dialog_id = await store.open(
-        tenant_id=tenant.id, user_key=request.user_key, dialog_id=request.dialog_id
+        tenant_id=tenant.id, user_key=request.user_id, dialog_id=request.dialog_id
     )
-    history, masking = await store.load(
-        tenant_id=tenant.id,
-        dialog_id=dialog_id,
-        masking_enabled=tenant.masking_enabled,
-    )
+    history = await store.load(tenant_id=tenant.id, dialog_id=dialog_id)
     already_saved = len(history)
+
+    # session_id = dialog_id: по нему расширение 1С находит таблицу псевдонимов
+    # маскирования, поэтому в рамках диалога он обязан быть постоянным (A.0.5).
+    context = CallContext(
+        user_id=request.user_id,
+        session_id=dialog_id,
+        locale="ru",
+        masking=tenant.masking_enabled,
+    )
 
     result, turns = await agent.run(
         tenant_id=tenant.id,
         user_message=request.message,
+        context=context,
         history=history,
-        masking=masking,
         allow_write_plans=request.allow_write_plans,
     )
 
@@ -75,7 +81,6 @@ async def ask(
         dialog_id=dialog_id,
         turns=turns,
         already_saved=already_saved,
-        masking=masking,
     )
 
     if settings.storage == "postgres":
@@ -83,14 +88,21 @@ async def ask(
             await journal.record_tool_call(
                 tenant_id=tenant.id,
                 dialog_id=dialog_id,
-                user_key=request.user_key,
+                user_key=request.user_id,
                 tool_name=call.tool,
-                onec_method=call.onec_method,
                 arguments=call.arguments,
                 ok=call.ok,
                 duration_ms=call.duration_ms,
-                error_message=call.error_message,
+                error_code=call.error_code.value if call.error_code else None,
             )
+            for plan_id, action in call.plans:
+                await journal.record_plan(
+                    plan_id=plan_id,
+                    tenant_id=tenant.id,
+                    dialog_id=dialog_id,
+                    tool_name=call.tool,
+                    action=action,
+                )
 
     log.info(
         "dialog_answered",
@@ -106,9 +118,9 @@ async def ask(
         calls=[
             ToolCallView(
                 tool=c.tool,
-                onec_method=c.onec_method,
                 ok=c.ok,
                 duration_ms=c.duration_ms,
+                error_code=c.error_code.value if c.error_code else None,
             )
             for c in result.calls
         ],
@@ -119,5 +131,5 @@ async def ask(
 
 @router.delete("/{dialog_id}", status_code=204)
 async def close_dialog(dialog_id: str, tenant: TenantDep, store: StoreDep) -> None:
-    """Закрыть диалог и стереть словарь псевдонимов, не дожидаясь ретеншна."""
+    """Закрыть диалог. Рабочая история больше не нужна."""
     await store.close(tenant_id=tenant.id, dialog_id=dialog_id)

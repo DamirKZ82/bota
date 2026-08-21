@@ -47,14 +47,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not settings.encryption_key:
             raise ErrorException(
                 RuntimeError(
-                    "Не задан ENCRYPTION_KEY — без него нельзя хранить словарь "
-                    "псевдонимов. Сгенерировать: openssl rand -base64 32"
+                    "Не задан ENCRYPTION_KEY — без него нельзя хранить ключи подписи "
+                    "баз. Сгенерировать: openssl rand -base64 32"
                 )
             )
         app.state.cipher = Cipher.from_base64(settings.encryption_key)
         await migrate(settings.database_url)
         await init_pool(settings.database_url)
-        store: DialogStore = PgDialogStore(app.state.cipher)
+        store: DialogStore = PgDialogStore()
     else:
         app.state.cipher = None
         store = MemoryDialogStore()
@@ -139,7 +139,6 @@ async def list_tools() -> list[dict[str, str]]:
     return [
         {
             "name": spec.name,
-            "onec_method": spec.onec_method,
             "writes": str(spec.writes),
             "description": spec.description,
         }

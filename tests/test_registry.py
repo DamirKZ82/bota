@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from orchestrator.tools.registry import BY_NAME, BY_ONEC_METHOD, TOOLS, anthropic_tools
+from orchestrator.tools.registry import BY_NAME, TOOLS, anthropic_tools
 
 ANTHROPIC_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -16,9 +16,8 @@ def test_имена_инструментов_подходят_для_claude_api(
         assert ANTHROPIC_NAME_RE.match(spec.name), f"{spec.name} не пройдёт валидацию tool name"
 
 
-def test_имена_уникальны_с_обеих_сторон() -> None:
+def test_имена_уникальны() -> None:
     assert len(BY_NAME) == len(TOOLS)
-    assert len(BY_ONEC_METHOD) == len(TOOLS)
 
 
 def test_у_каждого_инструмента_есть_описание() -> None:
@@ -34,10 +33,9 @@ def test_схема_генерируется_и_является_объекто�
 
 def test_агенту_недоступно_применение_изменений() -> None:
     """Фазы 2 в реестре быть не должно — применяет только пользователь из 1С."""
-    forbidden = ("apply", "применить", "provesti", "провести", "delete")
+    forbidden = ("apply", "set_settings", "delete", "post_document")
     for spec in TOOLS:
-        low = f"{spec.name} {spec.onec_method}".lower()
-        assert not any(word in low for word in forbidden), spec.name
+        assert not any(word in spec.name.lower() for word in forbidden), spec.name
 
 
 def test_инструменты_записи_называются_с_префиксом_plan() -> None:
@@ -46,6 +44,15 @@ def test_инструменты_записи_называются_с_префи�
             assert spec.name.startswith("plan_"), spec.name
 
 
-@pytest.mark.parametrize("name", ["get_context", "reconcile_period", "get_discrepancy"])
+@pytest.mark.parametrize(
+    "name", ["get_context", "reconcile_period", "get_discrepancy", "get_journal"]
+)
 def test_ключевые_инструменты_на_месте(name: str) -> None:
     assert name in BY_NAME
+
+
+def test_схема_показывает_модели_имена_из_приложения() -> None:
+    """`from` и `to` в JSON Schema, а не внутренние date_from / date_to."""
+    schema = BY_NAME["reconcile_period"].input_schema()
+    assert "from" in schema["properties"]
+    assert "date_from" not in schema["properties"]

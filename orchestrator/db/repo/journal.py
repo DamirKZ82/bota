@@ -18,25 +18,25 @@ async def record_tool_call(
     dialog_id: str | None,
     user_key: str,
     tool_name: str,
-    onec_method: str,
     arguments: dict[str, Any],
     ok: bool,
     duration_ms: int,
+    error_code: str | None = None,
     error_message: str | None = None,
 ) -> None:
     await execute_db(
         """
-        INSERT INTO tool_calls (tenant_id, dialog_id, user_key, tool_name, onec_method,
-                                arguments, ok, error_message, duration_ms)
+        INSERT INTO tool_calls (tenant_id, dialog_id, user_key, tool_name,
+                                arguments, ok, error_code, error_message, duration_ms)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """,
         tenant_id,
         dialog_id,
         user_key,
         tool_name,
-        onec_method,
         arguments,
         ok,
+        error_code,
         error_message,
         duration_ms,
     )
@@ -48,29 +48,27 @@ async def record_plan(
     tenant_id: str,
     dialog_id: str | None,
     tool_name: str,
-    title: str,
-    discrepancy_id: str | None,
-    changes_count: int,
-    blocked: bool,
-    block_reason: str | None,
+    action: str,
+    discrepancy_id: str | None = None,
 ) -> None:
-    """Запомнить предложенный план. Тело плана остаётся в 1С — здесь только след."""
+    """Запомнить предложенный план.
+
+    Тело плана живёт в 1С и там же применяется — оркестратору нужен только след:
+    что предложили, по какому расхождению и чем это закончилось.
+    """
     await execute_db(
         """
-        INSERT INTO change_plans (plan_id, tenant_id, dialog_id, tool_name, discrepancy_id,
-                                  title, changes_count, blocked, block_reason)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO change_plans (plan_id, tenant_id, dialog_id, tool_name, action,
+                                  discrepancy_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (plan_id) DO NOTHING
         """,
         plan_id,
         tenant_id,
         dialog_id,
         tool_name,
+        action,
         discrepancy_id,
-        title,
-        changes_count,
-        blocked,
-        block_reason,
     )
 
 

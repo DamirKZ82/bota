@@ -1,24 +1,25 @@
-"""Обратный транспорт поверх очереди в Postgres.
+"""Обратный транспорт поверх очереди в Postgres (A.0.1).
 
-Отличие от `polling.py` (очередь в памяти) — в том, где ждёт вызывающая сторона.
-В памяти это был `asyncio.Future`, который существует только в том процессе, что
-поставил задачу. Здесь ожидание — опрос строки в таблице, поэтому задачу может
-поставить один воркер, а результат принять другой.
+Отличие от очереди в памяти — в том, где ждёт вызывающая сторона. В памяти это
+был `asyncio.Future`, существующий только в том процессе, что поставил задачу.
+Здесь ожидание — опрос строки в таблице, поэтому задачу может поставить один
+воркер, а результат принять другой.
 
 Опрос, а не `LISTEN/NOTIFY`, сознательно: интервал в полсекунды на фоне сверки,
 которая идёт десятки секунд, ничего не стоит, а `LISTEN` требует отдельного
-соединения на процесс и переподключения после обрыва.
+соединения на процесс и переподключения после каждого обрыва.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
 
 import structlog
 
 from orchestrator.db.repo import poll_tasks
-from orchestrator.transport.base import OneCTransport, ToolCallError, ToolTimeout
+from orchestrator.tools.envelope import ToolRequest, ToolResponse
+from orchestrator.transport.base import OneCTransport, TransportError, TransportTimeout
 
 log = structlog.get_logger(__name__)
 
@@ -28,39 +29,44 @@ class PgPollingTransport(OneCTransport):
         self._timeout = timeout_seconds
         self._poll_interval = poll_interval
 
-    async def call(
-        self, tenant_id: str, onec_method: str, params: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def call(self, tenant_id: str, request: ToolRequest) -> ToolResponse:
         task_id = await poll_tasks.enqueue(
-            tenant_id=tenant_id, onec_method=onec_method, params=params
+            tenant_id=tenant_id,
+            tool=request.tool,
+            request=json.loads(request.model_dump_json(by_alias=True)),
         )
         try:
             return await asyncio.wait_for(
-                self._await_result(tenant_id, task_id, onec_method),
+                self._await_response(tenant_id, task_id, request.tool),
                 timeout=self._timeout,
             )
         except TimeoutError as err:
             await poll_tasks.expire(tenant_id=tenant_id, task_id=task_id)
-            raise ToolTimeout(onec_method, self._timeout) from err
+            raise TransportTimeout(request.tool, self._timeout) from err
 
-    async def _await_result(
-        self, tenant_id: str, task_id: str, onec_method: str
-    ) -> dict[str, Any]:
+    async def _await_response(
+        self, tenant_id: str, task_id: str, tool: str
+    ) -> ToolResponse:
         while True:
             state = await poll_tasks.get_state(tenant_id=tenant_id, task_id=task_id)
             if state is None:
-                raise ToolCallError(f"Задача «{onec_method}» исчезла из очереди")
+                raise TransportError(f"Задача «{tool}» исчезла из очереди")
 
             if state.status == "done":
-                if state.result is None:
-                    raise ToolCallError(f"«{onec_method}» завершился без результата")
-                return state.result
+                if state.response is None:
+                    raise TransportError(f"«{tool}» завершился без ответа")
+                try:
+                    return ToolResponse.model_validate(state.response)
+                except ValueError as err:
+                    raise TransportError(
+                        f"1С прислала непонятный ответ на «{tool}»: {err}"
+                    ) from err
             if state.status == "failed":
-                raise ToolCallError(
-                    state.error_message or f"1С сообщила об ошибке в «{onec_method}»"
+                raise TransportError(
+                    state.error_message or f"1С сообщила об ошибке в «{tool}»"
                 )
             if state.status == "expired":
-                raise ToolTimeout(onec_method, self._timeout)
+                raise TransportTimeout(tool, self._timeout)
 
             await asyncio.sleep(self._poll_interval)
 

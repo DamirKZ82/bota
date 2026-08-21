@@ -5,7 +5,9 @@
 -- Поэтому здесь НЕТ:
 --   * отображаемой истории диалога — её ведёт форма «Агент» в 1С (ТЗ п.7);
 --   * тел планов изменений — план формирует и применяет 1С, здесь только его id;
---   * кэша сверки — он кэшируется в базе 1С (ТЗ п.8).
+--   * кэша сверки — он кэшируется в базе 1С (ТЗ п.8);
+--   * таблицы псевдонимов маскирования — она живёт в 1С (Приложение А, A.0.5),
+--     оркестратор соответствий не знает вовсе.
 -- Хранится замаскированная рабочая история (то, что видела модель), метаданные
 -- вызовов и агрегаты для метрик пилота.
 
@@ -79,21 +81,6 @@ CREATE UNIQUE INDEX dialog_turns_seq_idx ON dialog_turns (dialog_id, seq);
 COMMENT ON COLUMN dialog_turns.content IS
     'Замаскированный ход диалога; отображаемая пользователю история живёт в 1С';
 
--- Словарь псевдонимов сессии маскирования (ТЗ п.6.4).
---
--- Единственное место, где реальные значения вообще попадают в эту базу, поэтому
--- значение зашифровано ключом приложения, а строка удаляется вместе с диалогом.
--- Без него после перезапуска оркестратора нельзя вернуть пользователю реальные
--- наименования, и диалог пришлось бы начинать заново.
-CREATE TABLE dialog_aliases (
-    dialog_id           UUID NOT NULL REFERENCES dialogs (id) ON DELETE CASCADE,
-    tenant_id           TEXT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
-    alias               TEXT NOT NULL,
-    value_enc           BYTEA NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (dialog_id, alias)
-);
-
 -- ---------------------------------------------------------------------------
 -- Журнал (ТЗ п.8: все вызовы и все изменения, хранение 12 месяцев)
 -- ---------------------------------------------------------------------------
@@ -104,10 +91,12 @@ CREATE TABLE tool_calls (
     dialog_id           UUID REFERENCES dialogs (id) ON DELETE SET NULL,
     user_key            TEXT NOT NULL,
     tool_name           TEXT NOT NULL,
-    onec_method         TEXT NOT NULL,
-    -- Аргументы приходят от модели, то есть уже в псевдонимах.
+    -- Аргументы приходят от модели, то есть уже в псевдонимах: маскирование
+    -- выполняет расширение 1С, и модель оперирует только ими (A.0.5).
     arguments           JSONB NOT NULL DEFAULT '{}'::JSONB,
     ok                  BOOLEAN NOT NULL,
+    -- Код из A.0.2: BAD_ARGS, PERIOD_CLOSED, TIMEOUT и т. д.
+    error_code          TEXT,
     error_message       TEXT,
     duration_ms         INTEGER NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -123,12 +112,9 @@ CREATE TABLE change_plans (
     tenant_id           TEXT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
     dialog_id           UUID REFERENCES dialogs (id) ON DELETE SET NULL,
     tool_name           TEXT NOT NULL,
+    -- Действие из плана: set_link, adjust_lines, create_receipt_from_esf…
+    action              TEXT NOT NULL,
     discrepancy_id      TEXT,
-    -- Заголовок в псевдонимах — тот же текст, что видел пользователь на кнопке.
-    title               TEXT NOT NULL,
-    changes_count       INTEGER NOT NULL DEFAULT 0,
-    blocked             BOOLEAN NOT NULL DEFAULT FALSE,
-    block_reason        TEXT,
     status              TEXT NOT NULL DEFAULT 'proposed'
                         CHECK (status IN ('proposed', 'applied', 'rejected', 'failed', 'expired')),
     -- Кто и когда применил (ТЗ п.5.2: кто, когда, что, по какому расхождению).
@@ -178,14 +164,14 @@ CREATE INDEX reconciliation_runs_tenant_time_idx
 CREATE TABLE poll_tasks (
     id                  UUID PRIMARY KEY,
     tenant_id           TEXT NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
-    onec_method         TEXT NOT NULL,
-    params              JSONB NOT NULL,
+    tool                TEXT NOT NULL,
+    request             JSONB NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'leased', 'done', 'failed', 'expired')),
     attempts            SMALLINT NOT NULL DEFAULT 0,
     leased_at           TIMESTAMPTZ,
     lease_expires_at    TIMESTAMPTZ,
-    result              JSONB,
+    response            JSONB,
     error_message       TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at        TIMESTAMPTZ
@@ -262,8 +248,8 @@ BEGIN
     GET DIAGNOSTICS affected = ROW_COUNT;
     RETURN QUERY SELECT 'warns'::TEXT, affected;
 
-    -- Диалоги вместе с ходами и словарём псевдонимов: чем меньше живёт
-    -- расшифровка псевдонимов, тем лучше.
+    -- Диалоги вместе с ходами: рабочая история модели ценности не имеет
+    -- дольше самого диалога.
     DELETE FROM dialogs WHERE last_activity_at < dialog_before;
     GET DIAGNOSTICS affected = ROW_COUNT;
     RETURN QUERY SELECT 'dialogs'::TEXT, affected;

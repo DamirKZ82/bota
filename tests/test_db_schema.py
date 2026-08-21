@@ -25,7 +25,6 @@ from orchestrator.db.crypto import Cipher
 from orchestrator.db.migrate import MIGRATIONS_DIR, discover, migrate
 from orchestrator.db.repo import dialogs, journal, poll_tasks, runs, tenants
 from orchestrator.llm.base import AssistantTurn, TextBlock, UserTurn
-from orchestrator.masking.masker import MaskingSession
 
 TEST_DSN = os.getenv("BOTA_TEST_DSN")
 requires_db = pytest.mark.skipif(TEST_DSN is None, reason="не задан BOTA_TEST_DSN")
@@ -54,10 +53,16 @@ def test_денежные_колонки_объявлены_numeric_а_не_floa
         assert " REAL" not in sql.upper()
 
 
+def test_в_схеме_нет_таблицы_псевдонимов() -> None:
+    """Маскирование делает 1С (A.0.5) — расшифровке псевдонимов здесь не место."""
+    sql = (MIGRATIONS_DIR / "0001_init.sql").read_text(encoding="utf-8")
+    assert "dialog_aliases" not in sql
+
+
 def test_таблицы_с_данными_баз_ссылаются_на_тенанта() -> None:
     """Изоляция баз держится на внешнем ключе, а не на аккуратности запросов."""
     sql = (MIGRATIONS_DIR / "0001_init.sql").read_text(encoding="utf-8")
-    for table in ("dialogs", "dialog_turns", "dialog_aliases", "tool_calls",
+    for table in ("dialogs", "dialog_turns", "tool_calls",
                   "change_plans", "reconciliation_runs", "poll_tasks"):
         block = sql.split(f"CREATE TABLE {table} (")[1].split(");")[0]
         assert "REFERENCES tenants" in block, f"{table} не привязана к тенанту"
@@ -151,50 +156,10 @@ async def test_история_диалога_переживает_перезап
 
 
 @requires_db
-async def test_словарь_псевдонимов_хранится_зашифрованным(
-    db: None, cipher: Cipher
-) -> None:
-    await tenants.register(tenant_id="t1", name="База", token="tok", transport="polling")
-    dialog_id = await dialogs.create(tenant_id="t1", user_key="buh")
-
-    session = MaskingSession()
-    session.mask({"name": "ТОО «Снабженец»"})
-    await dialogs.save_masking(
-        tenant_id="t1", dialog_id=dialog_id, cipher=cipher, session=session
-    )
-
-    rows = await db_pool.query_db("SELECT value_enc FROM dialog_aliases")
-    assert b"\xd0\xa2\xd0\x9e\xd0\x9e" not in bytes(rows[0]["value_enc"]), (
-        "наименование лежит в базе открытым текстом"
-    )
-
-    restored = await dialogs.load_masking(
-        tenant_id="t1", dialog_id=dialog_id, cipher=cipher, enabled=True
-    )
-    assert restored.unmask("КОНТРАГЕНТ_1") == "ТОО «Снабженец»"
-
-
-@requires_db
-async def test_закрытие_диалога_стирает_псевдонимы(db: None, cipher: Cipher) -> None:
-    await tenants.register(tenant_id="t1", name="База", token="tok", transport="polling")
-    dialog_id = await dialogs.create(tenant_id="t1", user_key="buh")
-    session = MaskingSession()
-    session.mask({"name": "ТОО «Альфа»"})
-    await dialogs.save_masking(
-        tenant_id="t1", dialog_id=dialog_id, cipher=cipher, session=session
-    )
-
-    await dialogs.close(tenant_id="t1", dialog_id=dialog_id)
-
-    rows = await db_pool.query_db("SELECT count(*) AS n FROM dialog_aliases")
-    assert rows[0]["n"] == 0
-
-
-@requires_db
 async def test_очередь_выдаёт_задачу_один_раз(db: None) -> None:
     await tenants.register(tenant_id="t1", name="База", token="tok", transport="polling")
     task_id = await poll_tasks.enqueue(
-        tenant_id="t1", onec_method="ПолучитьКонтекст", params={}
+        tenant_id="t1", tool="get_context", request={"tool": "get_context", "args": {}}
     )
 
     first = await poll_tasks.lease(tenant_id="t1")
@@ -203,7 +168,7 @@ async def test_очередь_выдаёт_задачу_один_раз(db: None
     assert second is None, "арендованная задача не должна выдаваться повторно"
 
     assert await poll_tasks.complete(
-        tenant_id="t1", task_id=task_id, result={"organizations": []}
+        tenant_id="t1", task_id=task_id, response={"ok": True, "tool": "get_context"}
     )
     state = await poll_tasks.get_state(tenant_id="t1", task_id=task_id)
     assert state is not None and state.status == "done"
@@ -212,18 +177,18 @@ async def test_очередь_выдаёт_задачу_один_раз(db: None
 @requires_db
 async def test_повторный_результат_по_закрытой_задаче_отвергается(db: None) -> None:
     await tenants.register(tenant_id="t1", name="База", token="tok", transport="polling")
-    task_id = await poll_tasks.enqueue(tenant_id="t1", onec_method="X", params={})
+    task_id = await poll_tasks.enqueue(tenant_id="t1", tool="x", request={})
     await poll_tasks.lease(tenant_id="t1")
-    await poll_tasks.complete(tenant_id="t1", task_id=task_id, result={})
+    await poll_tasks.complete(tenant_id="t1", task_id=task_id, response={})
 
-    assert not await poll_tasks.complete(tenant_id="t1", task_id=task_id, result={})
+    assert not await poll_tasks.complete(tenant_id="t1", task_id=task_id, response={})
 
 
 @requires_db
 async def test_очередь_чужой_базы_не_видна(db: None) -> None:
     await tenants.register(tenant_id="t1", name="Первая", token="tok1", transport="polling")
     await tenants.register(tenant_id="t2", name="Вторая", token="tok2", transport="polling")
-    await poll_tasks.enqueue(tenant_id="t1", onec_method="X", params={})
+    await poll_tasks.enqueue(tenant_id="t1", tool="x", request={})
 
     assert await poll_tasks.lease(tenant_id="t2") is None
 
@@ -237,11 +202,8 @@ async def test_план_закрывается_только_один_раз(db: 
         tenant_id="t1",
         dialog_id=None,
         tool_name="plan_adjust_lines",
-        title="Привести НДС строки 3 к значению из ЭСФ",
-        discrepancy_id="disc-0001",
-        changes_count=2,
-        blocked=False,
-        block_reason=None,
+        action="adjust_lines",
+        discrepancy_id="d1a2b3c4e5f6a7b8",
     )
 
     assert await journal.resolve_plan(
@@ -287,7 +249,6 @@ async def test_ретеншн_чистит_журнал_старше_срока(
         dialog_id=None,
         user_key="buh",
         tool_name="get_context",
-        onec_method="ПолучитьКонтекст",
         arguments={},
         ok=True,
         duration_ms=12,

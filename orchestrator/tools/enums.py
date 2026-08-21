@@ -1,28 +1,40 @@
-"""Справочники кодов из ТЗ (разделы 4.3–4.5).
+"""Справочники кодов (ТЗ разделы 4.3–4.5, Приложение А).
 
-Единственный источник правды для кодов расхождений. И движок в 1С, и оркестратор
-обязаны использовать одни и те же строковые значения — они уходят в LLM, в журнал
-и в отчёт на СКД.
+Единственный источник правды. И движок в 1С, и оркестратор используют одни и те
+же строковые значения — они уходят в LLM, в журнал и в отчёт на СКД.
+
+Значения латиницей, как в Приложении А: `high`, а не «высокая». Русские подписи
+хранятся отдельно (`*_LABEL`) и нужны только для показа пользователю — модель
+работает с кодами, а не с текстом.
 """
 
 from enum import StrEnum
 
 
 class Severity(StrEnum):
-    """Критичность расхождения (ТЗ п.4.5)."""
+    """Критичность расхождения (ТЗ п.4.5, A.2)."""
 
-    HIGH = "высокая"
-    MEDIUM = "средняя"
-    LOW = "низкая"
-    INFO = "инфо"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+SEVERITY_LABEL: dict[Severity, str] = {
+    Severity.HIGH: "высокая",
+    Severity.MEDIUM: "средняя",
+    Severity.LOW: "низкая",
+    Severity.INFO: "инфо",
+}
 
 
 class Confidence(StrEnum):
-    """Уверенность сопоставления — строк (п.4.3) и подбора номенклатуры (п.5.2.1)."""
+    """Уверенность сопоставления строк (п.4.3) и подбора номенклатуры (A.9.5)."""
 
-    HIGH = "высокая"
-    MEDIUM = "средняя"
-    LOW = "низкая"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    NONE = "none"
 
 
 class DiscrepancyCode(StrEnum):
@@ -46,7 +58,7 @@ class DiscrepancyCode(StrEnum):
     D16_RECEIPT_NOT_POSTED = "D16"
 
 
-#: Человекочитаемые описания и критичность по умолчанию (ТЗ п.4.5).
+#: Описание и критичность по умолчанию (ТЗ п.4.5).
 #: Критичность может быть переопределена настройками базы.
 DISCREPANCY_META: dict[DiscrepancyCode, tuple[str, Severity]] = {
     DiscrepancyCode.D01_NO_ESF_IN_TERM: (
@@ -101,7 +113,7 @@ DISCREPANCY_META: dict[DiscrepancyCode, tuple[str, Severity]] = {
 }
 
 
-class RoundingCode(StrEnum):
+class RoundingPattern(StrEnum):
     """Источник копеечной разницы (ТЗ п.4.4, таблица R1–R6).
 
     Определяет, какое исправление предлагать: R1–R4 автоматизируемы,
@@ -116,78 +128,121 @@ class RoundingCode(StrEnum):
     R6_UNEXPLAINED = "R6"
 
 
-ROUNDING_META: dict[RoundingCode, tuple[str, str]] = {
-    RoundingCode.R1_LINE_VS_TOTAL_VAT: (
+ROUNDING_META: dict[RoundingPattern, tuple[str, str]] = {
+    RoundingPattern.R1_LINE_VS_TOTAL_VAT: (
         "Построчное округление НДС vs от итога",
         "Допуск; при необходимости корректировка суммы НДС в строке",
     ),
-    RoundingCode.R2_VAT_INCLUDED_FLAG: (
+    RoundingPattern.R2_VAT_INCLUDED_FLAG: (
         "НДС «в том числе» vs «сверху»",
         "Изменить флаг «Сумма включает НДС» в поступлении",
     ),
-    RoundingCode.R3_PRICE_PRECISION: (
+    RoundingPattern.R3_PRICE_PRECISION: (
         "Округление цены (в ЭСФ 4+ знака, в 1С 2 знака)",
         "Привести цену к значению из ЭСФ / уточнить точность цены",
     ),
-    RoundingCode.R4_REMAINDER_ON_LAST_LINE: (
+    RoundingPattern.R4_REMAINDER_ON_LAST_LINE: (
         "Перенос остатка округления на последнюю строку",
         "Принять ЭСФ как эталон, скорректировать строку",
     ),
-    RoundingCode.R5_CURRENCY_RATE: ("Пересчёт валюты", "Проверить дату курса"),
-    RoundingCode.R6_UNEXPLAINED: ("Необъяснимая разница", "Ручной разбор"),
+    RoundingPattern.R5_CURRENCY_RATE: ("Пересчёт валюты", "Проверить дату курса"),
+    RoundingPattern.R6_UNEXPLAINED: ("Необъяснимая разница", "Ручной разбор"),
 }
 
 
-class LineMatchLevel(StrEnum):
-    """Уровень, на котором сопоставились строки (ТЗ п.4.3, таблица уровней 1–5)."""
+class LineMatch(StrEnum):
+    """Результат сопоставления строк (A.4)."""
 
-    L1_EXPLICIT_MAPPING = "1"  # справочник соответствий номенклатуры контрагента
-    L2_NORMALIZED_NAME = "2"  # нормализованное наименование + количество + цена
-    L3_QTY_PRICE_RATE = "3"  # количество + цена + ставка
-    L4_AMOUNT_RATE = "4"  # сумма строки + ставка
-    L5_FUZZY_NAME = "5"  # нечёткое совпадение наименования
+    MATCHED = "matched"
+    MATCHED_WITHIN_TOLERANCE = "matched_within_tolerance"
+    MATCHED_WITH_DIFF = "matched_with_diff"
+    ONLY_IN_RECEIPT = "only_in_receipt"
+    ONLY_IN_ESF = "only_in_esf"
+    ONE_TO_MANY = "one_to_many"
+    MANY_TO_ONE = "many_to_one"
 
 
-#: Уверенность, соответствующая уровню сопоставления (ТЗ п.4.3).
-LEVEL_CONFIDENCE: dict[LineMatchLevel, Confidence] = {
-    LineMatchLevel.L1_EXPLICIT_MAPPING: Confidence.HIGH,
-    LineMatchLevel.L2_NORMALIZED_NAME: Confidence.HIGH,
-    LineMatchLevel.L3_QTY_PRICE_RATE: Confidence.MEDIUM,
-    LineMatchLevel.L4_AMOUNT_RATE: Confidence.LOW,
-    LineMatchLevel.L5_FUZZY_NAME: Confidence.LOW,
+#: Уровень сопоставления 1–5 (ТЗ п.4.3) и соответствующая ему уверенность.
+#: В Приложении А `match_level` — число, а не строка.
+LEVEL_CONFIDENCE: dict[int, Confidence] = {
+    1: Confidence.HIGH,  # справочник соответствий номенклатуры контрагента
+    2: Confidence.HIGH,  # нормализованное наименование + количество + цена
+    3: Confidence.MEDIUM,  # количество + цена + ставка
+    4: Confidence.LOW,  # сумма строки + ставка
+    5: Confidence.LOW,  # нечёткое совпадение наименования
 }
 
 
-class LineStatus(StrEnum):
-    """Результат сверки строки (ТЗ п.4.3)."""
+class DiscrepancyStatus(StrEnum):
+    """Состояние расхождения в работе бухгалтера (A.3)."""
 
-    MATCH = "совпадает"
-    MATCH_WITHIN_TOLERANCE = "совпадает_в_допуске"
-    PRICE_MISMATCH = "расхождение_цены"
-    QTY_MISMATCH = "расхождение_количества"
-    AMOUNT_MISMATCH = "расхождение_суммы"
-    RATE_MISMATCH = "расхождение_ставки"
-    UOM_MISMATCH = "расхождение_единицы"
-    ONLY_IN_RECEIPT = "только_в_поступлении"
-    ONLY_IN_ESF = "только_в_ЭСФ"
-    ONE_TO_MANY = "одна_против_нескольких"
+    OPEN = "open"
+    REVIEWED = "reviewed"
+    FIXED = "fixed"
 
 
 class EsfStatus(StrEnum):
-    """Статус ЭСФ (ТЗ п.4.2)."""
+    """Статус ЭСФ в ИС ЭСФ (A.3, A.4)."""
 
-    ACTIVE = "выписана"
-    CANCELLED = "аннулирована"
-    REVOKED = "отозвана"
-    CORRECTED = "исправленная"
-    ADDITIONAL = "дополнительная"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    REVOKED = "revoked"
+    DRAFT = "draft"
 
 
-class DocumentKind(StrEnum):
-    """Виды документов, участвующих в сверке (ТЗ п.2)."""
+class EsfKind(StrEnum):
+    """Вид ЭСФ (A.4): основная, исправленная, дополнительная."""
 
-    RECEIPT_GOODS = "ПоступлениеТМЗиУслуг"
-    RECEIPT_EXTRA_COSTS = "ПоступлениеДопРасходов"
-    EXPENSE_REPORT = "АвансовыйОтчет"
-    ESF_RECEIVED = "ЭСФПолученный"
-    ADJUSTMENT = "КорректировкаПоступления"
+    ORIGINAL = "original"
+    FIXED = "fixed"
+    ADDITIONAL = "additional"
+
+
+class LinkKind(StrEnum):
+    """Как связаны поступление и ЭСФ (A.4)."""
+
+    EXPLICIT = "explicit"
+    SUGGESTED = "suggested"
+    NONE = "none"
+
+
+class ItemSource(StrEnum):
+    """Откуда взялся подбор номенклатуры (ТЗ п.5.2.1, A.9.5)."""
+
+    MAPPING = "mapping"
+    HISTORY = "history"
+    EXACT = "exact"
+    FUZZY = "fuzzy"
+    NONE = "none"
+
+
+class AdjustStrategy(StrEnum):
+    """Чей документ считается эталоном при правке строк (A.9.2)."""
+
+    ESF_AS_MASTER = "esf_as_master"
+    RECEIPT_AS_MASTER = "receipt_as_master"
+    CUSTOM = "custom"
+
+
+class ErrorCode(StrEnum):
+    """Коды ошибок расширения (A.0.2).
+
+    Модель видит код и решает, что делать: `BAD_ARGS` — исправить параметры,
+    `PERIOD_CLOSED` — предложить корректировку, `TIMEOUT` — повторить позже.
+    """
+
+    BAD_ARGS = "BAD_ARGS"
+    NOT_FOUND = "NOT_FOUND"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    PERIOD_CLOSED = "PERIOD_CLOSED"
+    LOCKED = "LOCKED"
+    TIMEOUT = "TIMEOUT"
+    LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
+    INTERNAL = "INTERNAL"
+    NOT_SUPPORTED_RELEASE = "NOT_SUPPORTED_RELEASE"
+
+
+#: Ошибки, при которых имеет смысл повторить вызов.
+RETRYABLE_ERRORS: frozenset[ErrorCode] = frozenset(
+    {ErrorCode.TIMEOUT, ErrorCode.LOCKED, ErrorCode.INTERNAL}
+)

@@ -5,14 +5,14 @@
 
 * инструменты исполняются не здесь, а в базе 1С через транспорт, который может
   быть очередью с поллингом;
-* каждый результат обязан пройти маскирование до того, как попадёт куда-либо ещё;
+* каждый вызов уходит в конверте с контекстом сессии (A.0.2) — по `session_id`
+  расширение подбирает таблицу псевдонимов для маскирования;
 * лимит в 30 вызовов — не защита от зацикливания, а обещание пользователю: при
   превышении он должен получить промежуточный результат и вопрос, а не обрыв.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -25,7 +25,8 @@ from orchestrator.llm.base import (
     Turn,
     UserTurn,
 )
-from orchestrator.masking.masker import MaskingSession
+from orchestrator.tools.enums import ErrorCode
+from orchestrator.tools.envelope import CallContext
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.tools.registry import TOOLS, ToolSpec, readable_tools
 
@@ -35,11 +36,11 @@ class ToolCallRecord:
     """Запись о вызове для блока «Что я проверил» и для журнала (ТЗ п.8)."""
 
     tool: str
-    onec_method: str
     ok: bool
     arguments: dict[str, object]
     duration_ms: int = 0
-    error_message: str | None = None
+    error_code: ErrorCode | None = None
+    plans: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -71,8 +72,8 @@ class AgentLoop:
         *,
         tenant_id: str,
         user_message: str,
+        context: CallContext,
         history: list[Turn] | None = None,
-        masking: MaskingSession | None = None,
         allow_write_plans: bool = True,
     ) -> tuple[AgentResult, list[Turn]]:
         """Отработать один запрос пользователя.
@@ -80,7 +81,6 @@ class AgentLoop:
         Возвращает результат и обновлённую историю — её нужно сохранить, чтобы
         следующий запрос в том же диалоге видел контекст.
         """
-        masking = masking or MaskingSession()
         turns: list[Turn] = list(history or [])
         turns.append(UserTurn(text=user_message))
 
@@ -135,9 +135,10 @@ class AgentLoop:
                             ToolResultBlock(
                                 tool_use_id=tu.id,
                                 content=(
-                                    f'{{"error": "Достигнут лимит в {self._max_tool_calls} '
-                                    'вызовов инструментов. Подведи промежуточный итог по уже '
-                                    'полученным данным и спроси пользователя, продолжать ли."}'
+                                    f'{{"error": {{"code": "LIMIT_EXCEEDED", "message": '
+                                    f'"Достигнут лимит в {self._max_tool_calls} вызовов. '
+                                    'Подведи промежуточный итог по уже полученным данным '
+                                    'и спроси пользователя, продолжать ли."}}}}'
                                 ),
                                 is_error=True,
                             )
@@ -149,22 +150,20 @@ class AgentLoop:
 
             results: list[ToolResultBlock] = []
             for use in tool_uses:
-                started = time.monotonic()
                 outcome = await self._executor.execute(
                     tenant_id=tenant_id,
                     tool_name=use.name,
                     arguments=use.input,
-                    masking=masking,
+                    context=context,
                 )
-                spec = self._executor.spec(use.name)
                 calls.append(
                     ToolCallRecord(
                         tool=use.name,
-                        onec_method=spec.onec_method if spec else "",
                         ok=outcome.ok,
                         arguments=use.input,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        error_message=None if outcome.ok else outcome.payload,
+                        duration_ms=outcome.duration_ms,
+                        error_code=outcome.error_code,
+                        plans=outcome.plans,
                     )
                 )
                 results.append(
@@ -181,7 +180,7 @@ class AgentLoop:
 
         return (
             AgentResult(
-                text=masking.unmask(answer.text),
+                text=answer.text,
                 calls=calls,
                 truncated=truncated,
                 usage=usage_total,
