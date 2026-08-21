@@ -9,7 +9,8 @@
 ожидание с фактом. Разошлись — правится модуль, а следом этот список.
 
     python scripts/recheck_1c_names.py --base-url http://localhost/WK --user odata.user
-    BOTA_1C_PASSWORD=... python scripts/recheck_1c_names.py         --base-url http://localhost/WK --user odata.user
+
+Пароль запрашивается интерактивно либо берётся из BOTA_1C_PASSWORD.
 
 Состав стандартного интерфейса OData настраивается в конфигураторе
 (Администрирование → Настройка состава стандартного интерфейса OData).
@@ -91,12 +92,12 @@ def fetch_metadata(base_url: str, user: str, password: str) -> str:
 def check(xml: str) -> list[str]:
     problems: list[str] = []
     for entity, fields in EXPECTED.items():
-        block = re.search(
-            r'<(?:EntityType|ComplexType) Name="%s".*?</(?:EntityType|ComplexType)>'
-            % re.escape(entity),
-            xml,
-            re.S,
+        # Сущности и составные типы объявляются разными тегами, ищем оба.
+        pattern = (
+            r'<(?:EntityType|ComplexType) Name="%s"'
+            r".*?</(?:EntityType|ComplexType)>" % re.escape(entity)
         )
+        block = re.search(pattern, xml, re.S)
         if not block:
             problems.append(
                 f"{entity}: не найден. Либо объект не включён в состав "
