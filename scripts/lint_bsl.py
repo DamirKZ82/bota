@@ -8,7 +8,9 @@
   функцию по имени невозможно, а глазами разница не видна;
 * **баланс блоков** — незакрытый `Если` или лишний `КонецЦикла` в длинном
   модуле ищется в конфигураторе долго и обидно;
-* **вызовы несуществующих экспортных методов** между нашими модулями.
+* **вызовы несуществующих экспортных методов** между нашими модулями;
+* **перебор значений в СтрШаблон** — он подставляет не больше десяти (%1…%10)
+  на любой версии платформы, и одиннадцатое значение это ошибка компиляции.
 
 Разбор учитывает две особенности языка: многострочные строковые литералы
 (текст запроса продолжается символом `|`) и условия, перенесённые на несколько
@@ -186,6 +188,41 @@ def check_blocks(path: Path, lines: list[tuple[int, str]]) -> list[str]:
     return problems
 
 
+#: СтрШаблон подставляет не больше десяти значений (%1…%10) на любой версии
+#: платформы. Одиннадцатый аргумент — ошибка компиляции «слишком много
+#: фактических параметров», и находится она только в конфигураторе.
+MAX_TEMPLATE_ARGS = 10
+
+
+def count_call_args(code: str, start: int) -> int:
+    """Считает аргументы верхнего уровня вызова, начиная с позиции после «(»."""
+    depth, index, args = 1, start, 1
+    while index < len(code) and depth > 0:
+        char = code[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 1:
+            args += 1
+        index += 1
+    return args
+
+
+def check_template_args(path: Path, lines: list[tuple[int, str]]) -> list[str]:
+    problems: list[str] = []
+    for number, code in lines:
+        for match in re.finditer(r"\bСтрШаблон\s*\(", code, re.I):
+            args = count_call_args(code, match.end())
+            if args - 1 > MAX_TEMPLATE_ARGS:
+                problems.append(
+                    f"{path.name}:{number}: СтрШаблон получает {args - 1} значений, "
+                    f"а подставляет не больше {MAX_TEMPLATE_ARGS}. "
+                    f"Используйте БотаМетаданныеТиповой.ПодставитьИмена"
+                )
+    return problems
+
+
 def check_exports(paths: list[Path]) -> list[str]:
     """Вызовы вида `БотаМодуль.Функция(...)` должны существовать в наших модулях."""
     declared: dict[str, set[str]] = {}
@@ -234,6 +271,7 @@ def main() -> None:
         parsed = logical_lines(path.read_text(encoding="utf-8").splitlines())
         problems += check_mixed_alphabet(path, parsed)
         problems += check_blocks(path, parsed)
+        problems += check_template_args(path, parsed)
     problems += check_exports(targets)
 
     for problem in problems:
